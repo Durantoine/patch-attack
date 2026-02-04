@@ -170,7 +170,7 @@ def train_on_dataset(
     model,
     dataloader: DataLoader,
     device: str,
-    patch_size: int = 24,
+    patch_size: int = 32,
     steps: int = 2000,
     lr: float = 0.05,
     use_eot: bool = False,
@@ -326,7 +326,7 @@ def train_on_dataset(
 # Visualisation
 # =========================
 
-def visualize_results(result: dict, model, dataloader, device, output_path: str):
+def visualize_results(result: dict, model, dataloader, device, output_path: str, n_clusters: int = 4):
     """Visualise les résultats de l'entraînement."""
     patch = result['patch']
     history = result['history']
@@ -377,9 +377,15 @@ def visualize_results(result: dict, model, dataloader, device, output_path: str)
         adv_features = model.get_intermediate_layers(patched_images[:1], n=1)[0]
         adv_tokens = F.normalize(adv_features[0, 1:], dim=-1)
 
-    kmeans = KMeans(n_clusters=4, n_init=3, random_state=42)
-    labels_ref = kmeans.fit_predict(ref_tokens.cpu().numpy()).reshape(14, 14)
-    labels_adv = kmeans.fit_predict(adv_tokens.cpu().numpy()).reshape(14, 14)
+    kmeans = KMeans(n_clusters=n_clusters, n_init=3, random_state=42)
+    ref_np = ref_tokens.cpu().numpy()
+    adv_np = adv_tokens.cpu().numpy()
+    # Pad to 196 if needed (some models have 195 tokens)
+    if len(ref_np) < 196:
+        ref_np = np.vstack([ref_np, np.zeros((196 - len(ref_np), ref_np.shape[1]))])
+        adv_np = np.vstack([adv_np, np.zeros((196 - len(adv_np), adv_np.shape[1]))])
+    labels_ref = kmeans.fit_predict(ref_np[:196]).reshape(14, 14)
+    labels_adv = kmeans.fit_predict(adv_np[:196]).reshape(14, 14)
 
     ax = fig.add_subplot(3, 4, 11)
     ax.imshow(np.kron(labels_ref, np.ones((16, 16))), cmap='tab10')
@@ -423,7 +429,7 @@ Examples:
 
     parser.add_argument('--dataset', type=str, required=True,
                        help='Path to dataset directory')
-    parser.add_argument('--patch-size', type=int, default=24,
+    parser.add_argument('--patch-size', type=int, default=32,
                        help='Patch size (default 24)')
     parser.add_argument('--steps', type=int, default=2000,
                        help='Training steps (default 2000)')
@@ -443,6 +449,8 @@ Examples:
                        help='Resume from checkpoint')
     parser.add_argument('--output', type=str, default='results',
                        help='Output directory')
+    parser.add_argument('--clusters', type=int, default=4,
+                       help='Number of K-means clusters for segmentation visualization')
     parser.add_argument('--save-every', type=int, default=500,
                        help='Save checkpoint every N steps')
 
@@ -494,7 +502,7 @@ Examples:
 
     # Visualize
     viz_path = Path(args.output) / "training_results.png"
-    visualize_results(result, model, dataloader, device, str(viz_path))
+    visualize_results(result, model, dataloader, device, str(viz_path), n_clusters=args.clusters)
 
 
 if __name__ == "__main__":

@@ -36,9 +36,10 @@ uv sync
 │   ├── demo_dinov3.py              # Basic embedding attack
 │   └── demo_segmentation_attack.py # Segmentation coherence attack
 ├── results/                 # Output visualizations & saved patches
-├── scripts/                 # Training scripts
+├── scripts/                 # Training & visualization scripts
 │   ├── train_patch.py              # Single image/webcam patch training
-│   └── train_dataset.py            # Dataset-based universal patch training
+│   ├── train_dataset.py            # Dataset-based universal patch training
+│   └── visualize_sequence.py       # Sequence visualization (video) of attack effects
 ├── src/                     # Source code
 │   ├── attacks/             # Attack implementations
 │   │   ├── patch_attack.py         # Base patch attack
@@ -182,7 +183,6 @@ python scripts/train_patch.py --webcam --steps 500
 
 ### Train on Dataset with EOT (Recommended for real-world use)
 
-Train a universal patch that works across many images **and viewing angles**:
 
 ```bash
 # Basic training
@@ -213,8 +213,52 @@ python scripts/train_dataset.py \
 | `--lr` | 0.01 | Learning rate (higher = faster, less stable) |
 | `--eot` | False | Enable EOT transforms |
 | `--n-eot` | 4 | Transforms per image if EOT enabled |
+| `--clusters` | 4 | Number of K-means clusters for segmentation |
 | `--output` | results | Output directory |
 | `--save-every` | 500 | Save checkpoint every N steps |
+
+### Visualize Attack on Image Sequence
+
+After training a patch, visualize its effect on a sequence as a video:
+
+```bash
+# Full dashboard (default: mode=all)
+python scripts/visualize_sequence.py --dataset data/stuttgart_00 --patch results/universal_patch_final.pt --size 300 --fps 15
+
+# Save as video
+python scripts/visualize_sequence.py --dataset data/stuttgart_00 --patch results/universal_patch_final.pt --size 300 --fps 15 --output results/attack_video.mp4
+```
+
+**Modes:**
+
+| Mode | Layout | Description |
+|------|--------|-------------|
+| `all` | 2x4 grid | Full dashboard with all visualizations |
+| `pca` | 1x3 | Image + PCA original + PCA attacked |
+| `segment` | 1x4 | Image + Seg original + Seg attacked + Diff |
+| `trajectory` | 1x2 | Image + PCA token displacement arrows |
+| `both` | 1x4 | Image + PCA original + PCA attacked + Distance heatmap |
+
+**Parameters:**
+| Param | Default | Description |
+|-------|---------|-------------|
+| `--dataset` | required | Path to image folder |
+| `--patch` | required | Path to trained patch (.pt) |
+| `--patch-pos` | 50 50 | Patch position (x, y) |
+| `--patch-size` | 32 | Patch size in pixels |
+| `--size` | 300 | Visualization panel size |
+| `--mode` | all | Visualization mode |
+| `--clusters` | 4 | Number of K-means clusters |
+| `--fps` | 10 | Playback / output video FPS |
+| `--smooth` | off | Use smooth interpolation |
+| `--refresh` | 50 | Refresh models every N frames (0 = never) |
+| `--output` | None | Save to MP4 instead of display |
+
+**Controls:**
+| Key | Action |
+|-----|--------|
+| `q` | Quit |
+| `Space` | Pause / Resume |
 
 ### Recommended Datasets
 
