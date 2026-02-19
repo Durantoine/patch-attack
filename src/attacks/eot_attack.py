@@ -3,32 +3,32 @@ Expectation Over Transformation (EOT) Attack
 Entraîne un patch robuste aux transformations géométriques et photométriques.
 """
 
+from dataclasses import dataclass
+
+import cv2
+import kornia.geometry.transform as KG
+import numpy as np
 import torch
 import torch.nn.functional as F
-import numpy as np
-import cv2
-from dataclasses import dataclass
-from typing import Tuple, Optional
-import kornia.augmentation as K
-import kornia.geometry.transform as KG
 
 
 @dataclass
 class EOTConfig:
     """Configuration des transformations EOT."""
+
     # Rotation
-    rotation_range: Tuple[float, float] = (-30, 30)  # degrés
+    rotation_range: tuple[float, float] = (-30, 30)  # degrés
 
     # Échelle
-    scale_range: Tuple[float, float] = (0.7, 1.3)
+    scale_range: tuple[float, float] = (0.7, 1.3)
 
     # Perspective (simule angle de vue)
     perspective_strength: float = 0.3
 
     # Couleur
-    brightness_range: Tuple[float, float] = (-0.2, 0.2)
-    contrast_range: Tuple[float, float] = (0.8, 1.2)
-    saturation_range: Tuple[float, float] = (0.8, 1.2)
+    brightness_range: tuple[float, float] = (-0.2, 0.2)
+    contrast_range: tuple[float, float] = (0.8, 1.2)
+    saturation_range: tuple[float, float] = (0.8, 1.2)
 
     # Bruit
     noise_std: float = 0.05
@@ -63,20 +63,17 @@ class PatchTransformer:
 
         # Resize
         scaled = F.interpolate(
-            patch.unsqueeze(0),
-            size=(new_size, new_size),
-            mode='bilinear',
-            align_corners=False
+            patch.unsqueeze(0), size=(new_size, new_size), mode="bilinear", align_corners=False
         ).squeeze(0)
 
         # Pad ou crop pour revenir à la taille originale
         orig_size = patch.shape[1]
         if new_size < orig_size:
             pad = (orig_size - new_size) // 2
-            scaled = F.pad(scaled, (pad, pad, pad, pad), mode='constant', value=0)
+            scaled = F.pad(scaled, (pad, pad, pad, pad), mode="constant", value=0)
         elif new_size > orig_size:
             start = (new_size - orig_size) // 2
-            scaled = scaled[:, start:start+orig_size, start:start+orig_size]
+            scaled = scaled[:, start : start + orig_size, start : start + orig_size]
 
         return scaled[:, :orig_size, :orig_size]
 
@@ -86,15 +83,16 @@ class PatchTransformer:
         h, w = patch.shape[1], patch.shape[2]
 
         # Points sources (coins)
-        src = torch.tensor([[
-            [0, 0],
-            [w-1, 0],
-            [w-1, h-1],
-            [0, h-1]
-        ]], dtype=torch.float32).to(self.device)
+        src = torch.tensor(
+            [[[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]]], dtype=torch.float32
+        ).to(self.device)
 
         # Points destination (avec perturbation aléatoire)
-        offset = torch.empty(1, 4, 2).uniform_(-strength * min(h, w), strength * min(h, w)).to(self.device)
+        offset = (
+            torch.empty(1, 4, 2)
+            .uniform_(-strength * min(h, w), strength * min(h, w))
+            .to(self.device)
+        )
         dst = src + offset
 
         # Assurer que les points restent valides
@@ -161,7 +159,9 @@ class EOTAttack:
         tokens = features[0, 1:]
         return F.normalize(tokens, dim=1)
 
-    def apply_patch(self, image: torch.Tensor, patch: torch.Tensor, pos: Tuple[int, int]) -> torch.Tensor:
+    def apply_patch(
+        self, image: torch.Tensor, patch: torch.Tensor, pos: tuple[int, int]
+    ) -> torch.Tensor:
         """Applique le patch sur l'image."""
         x, y = pos
         patched = image.clone()
@@ -171,7 +171,9 @@ class EOTAttack:
 
         # Masque pour le patch (ignorer les pixels noirs du padding)
         mask = (patch.sum(dim=0, keepdim=True) > 0.1).float()
-        patched[:, x:x+ph, y:y+pw] = patch * mask + patched[:, x:x+ph, y:y+pw] * (1 - mask)
+        patched[:, x : x + ph, y : y + pw] = patch * mask + patched[:, x : x + ph, y : y + pw] * (
+            1 - mask
+        )
 
         return patched
 
@@ -214,7 +216,7 @@ class EOTAttack:
             center = 112 - patch_size // 2
             positions = [(center, center)] * len(images)
 
-        best_loss = float('inf')
+        best_loss = float("inf")
         best_patch = patch.clone()
 
         for step in range(steps):
@@ -244,7 +246,7 @@ class EOTAttack:
                     loss = -F.mse_loss(tokens_adv, ref_tokens[idx])
                     total_loss += loss
 
-            total_loss /= (n_samples * self.config.n_transforms)
+            total_loss /= n_samples * self.config.n_transforms
             total_loss.backward()
             optimizer.step()
             patch.data.clamp_(0, 1)
@@ -266,8 +268,8 @@ def apply_3d_perspective(
     pitch: float = 0,
     roll: float = 0,
     scale: float = 1.0,
-    output_size: Optional[Tuple[int, int]] = None
-) -> Tuple[np.ndarray, np.ndarray]:
+    output_size: tuple[int, int] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Applique une transformation 3D au patch.
 
@@ -292,31 +294,30 @@ def apply_3d_perspective(
     roll_rad = np.radians(roll)
 
     # Points 3D du patch (carré unitaire centré)
-    pts_3d = np.array([
-        [-0.5, -0.5, 0],
-        [0.5, -0.5, 0],
-        [0.5, 0.5, 0],
-        [-0.5, 0.5, 0]
-    ], dtype=np.float32)
+    pts_3d = np.array(
+        [[-0.5, -0.5, 0], [0.5, -0.5, 0], [0.5, 0.5, 0], [-0.5, 0.5, 0]], dtype=np.float32
+    )
 
     # Matrices de rotation
-    Rx = np.array([
-        [1, 0, 0],
-        [0, np.cos(pitch_rad), -np.sin(pitch_rad)],
-        [0, np.sin(pitch_rad), np.cos(pitch_rad)]
-    ])
+    Rx = np.array(
+        [
+            [1, 0, 0],
+            [0, np.cos(pitch_rad), -np.sin(pitch_rad)],
+            [0, np.sin(pitch_rad), np.cos(pitch_rad)],
+        ]
+    )
 
-    Ry = np.array([
-        [np.cos(yaw_rad), 0, np.sin(yaw_rad)],
-        [0, 1, 0],
-        [-np.sin(yaw_rad), 0, np.cos(yaw_rad)]
-    ])
+    Ry = np.array(
+        [[np.cos(yaw_rad), 0, np.sin(yaw_rad)], [0, 1, 0], [-np.sin(yaw_rad), 0, np.cos(yaw_rad)]]
+    )
 
-    Rz = np.array([
-        [np.cos(roll_rad), -np.sin(roll_rad), 0],
-        [np.sin(roll_rad), np.cos(roll_rad), 0],
-        [0, 0, 1]
-    ])
+    Rz = np.array(
+        [
+            [np.cos(roll_rad), -np.sin(roll_rad), 0],
+            [np.sin(roll_rad), np.cos(roll_rad), 0],
+            [0, 0, 1],
+        ]
+    )
 
     # Rotation combinée
     R = Rz @ Ry @ Rx
@@ -331,12 +332,7 @@ def apply_3d_perspective(
         pts_2d[i, 1] = (pt[1] / z) * f * scale
 
     # Convertir en coordonnées image
-    pts_src = np.array([
-        [0, 0],
-        [w-1, 0],
-        [w-1, h-1],
-        [0, h-1]
-    ], dtype=np.float32)
+    pts_src = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=np.float32)
 
     out_h, out_w = output_size
     pts_dst = pts_2d.copy()
@@ -351,19 +347,23 @@ def apply_3d_perspective(
         patch = patch[:, :, np.newaxis]
 
     transformed = cv2.warpPerspective(
-        patch, M, (out_w, out_h),
+        patch,
+        M,
+        (out_w, out_h),
         flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0
+        borderValue=0,
     )
 
     # Créer le masque alpha
     mask = np.ones((h, w), dtype=np.float32)
     mask_transformed = cv2.warpPerspective(
-        mask, M, (out_w, out_h),
+        mask,
+        M,
+        (out_w, out_h),
         flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0
+        borderValue=0,
     )
 
     return transformed, mask_transformed
@@ -372,11 +372,11 @@ def apply_3d_perspective(
 def apply_patch_with_perspective(
     image: np.ndarray,
     patch: np.ndarray,
-    position: Tuple[int, int],
+    position: tuple[int, int],
     yaw: float = 0,
     pitch: float = 0,
     roll: float = 0,
-    scale: float = 1.0
+    scale: float = 1.0,
 ) -> np.ndarray:
     """
     Applique un patch avec transformation 3D sur une image.
@@ -395,9 +395,7 @@ def apply_patch_with_perspective(
     patch_size = max(patch.shape[0], patch.shape[1])
     output_size = (int(patch_size * 1.5), int(patch_size * 1.5))  # Marge pour la rotation
 
-    transformed, mask = apply_3d_perspective(
-        patch, yaw, pitch, roll, scale, output_size
-    )
+    transformed, mask = apply_3d_perspective(patch, yaw, pitch, roll, scale, output_size)
 
     # Position du patch
     cx, cy = position
@@ -434,8 +432,7 @@ def apply_patch_with_perspective(
         mask_region = mask_region[:, :, np.newaxis]
 
     result[iy1:iy2, ix1:ix2] = (
-        patch_region * mask_region +
-        result[iy1:iy2, ix1:ix2] * (1 - mask_region)
+        patch_region * mask_region + result[iy1:iy2, ix1:ix2] * (1 - mask_region)
     ).astype(np.uint8)
 
     return result

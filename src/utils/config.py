@@ -1,77 +1,38 @@
-"""Configuration management utilities."""
+"""Default configuration for all scripts.
 
-import yaml
-from pathlib import Path
-from typing import Any, Dict
+Modify these values to change defaults without CLI arguments.
+"""
 
+# === Paths ===
+CITYSCAPES_IMAGES: str = "data/leftImg8bit_trainvaltest/leftImg8bit/train"
+CITYSCAPES_LABELS: str = "data/gtFine_trainvaltest-2/gtFine/train"
+DATASET: str = "data/leftImg8bit_trainvaltest/leftImg8bit/train"
+CLASSIFIER: str = "results/classifier.pt"
+OUTPUT_DIR: str = "results"
 
-def load_config(config_path: str | Path) -> Dict[str, Any]:
-    """Load configuration from YAML file.
+# === Model ===
+IMG_SIZE: int = 672          # 224=14x14, 448=28x28, 672=42x42
 
-    Args:
-        config_path: Path to the YAML configuration file
+# === Classifier training (train_classifier.py) ===
+CLF_EPOCHS: int = 20
+CLF_LR: float = 0.001
 
-    Returns:
-        Dictionary containing configuration parameters
-    """
-    config_path = Path(config_path)
+# === Attack (attack_classifier.py) ===
+SOURCE_CLASS: int = 11       # person
+TARGET_CLASS: int = -1       # -1 = untargeted (any misclassification)
+ATTACK_STEPS: int = 3000
+ATTACK_LR: float = 0.05
+ATTACK_BATCH_SIZE: int = 4
+PATCH_SIZE: int = 112        # Size on image (pixels) — ~17% of IMG_SIZE
+PATCH_RES: int = 256         # Internal patch resolution (optimized pixels)
+PATCH_PERSPECTIVE_MIN_SCALE: float = 0.2  # Min scale at top (far) vs bottom (near)
 
-    if not config_path.exists():
-        raise FileNotFoundError(f"Configuration file not found: {config_path}")
-
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-
-    return config
-
-
-def merge_configs(*configs: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge multiple configuration dictionaries.
-
-    Later configurations override earlier ones.
-
-    Args:
-        *configs: Variable number of configuration dictionaries
-
-    Returns:
-        Merged configuration dictionary
-    """
-    merged = {}
-
-    for config in configs:
-        merged = _deep_update(merged, config)
-
-    return merged
-
-
-def _deep_update(base_dict: Dict[str, Any], update_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Recursively update a dictionary.
-
-    Args:
-        base_dict: Base dictionary to update
-        update_dict: Dictionary with updates
-
-    Returns:
-        Updated dictionary
-    """
-    for key, value in update_dict.items():
-        if isinstance(value, dict) and key in base_dict and isinstance(base_dict[key], dict):
-            base_dict[key] = _deep_update(base_dict[key], value)
-        else:
-            base_dict[key] = value
-
-    return base_dict
-
-
-def save_config(config: Dict[str, Any], output_path: str | Path) -> None:
-    """Save configuration to YAML file.
-
-    Args:
-        config: Configuration dictionary
-        output_path: Path to save the configuration
-    """
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(output_path, "w") as f:
-        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+# === Visualization ===
+VIZ_SIZE: int = 500          # Panel size for training viz
+VIZ_EVERY: int = 10          # Show live viz every N steps (0=off)
+VIZ_SEQ_SIZE: int = 300      # Panel size for sequence visualization
+FPS: int = 10                # Playback FPS
+CLUSTERS: int = 4            # K-means clusters
+REFRESH: int = 50            # Refresh models every N frames
+FOCUS_CLASSES: list[int] = [0, 11, 13]  # road, person, car
+PATCH_POS: list[int] = [50, 50]         # Default patch position

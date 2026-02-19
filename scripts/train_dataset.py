@@ -1,21 +1,11 @@
-#!/usr/bin/env python3
-"""
-Entraînement d'un patch adversarial sur un dataset complet.
-Génère un patch universel robuste.
+"""Train universal adversarial patch on a dataset.
 
 Usage:
-    # Sur le dataset Birds
-    python scripts/train_dataset.py --dataset data/Birds --steps 2000
-
-    # Avec augmentations EOT
-    python scripts/train_dataset.py --dataset data/Birds --eot --steps 1500
-
-    # Reprendre un entraînement
-    python scripts/train_dataset.py --dataset data/Birds --resume results/patch.pt
+    python scripts/train_dataset.py --dataset data/stuttgart_00 --steps 2000
+    python scripts/train_dataset.py --dataset data/stuttgart_00 --eot --steps 1500
+    python scripts/train_dataset.py --dataset data/stuttgart_00 --resume results/patch.pt
 """
-
 import os
-# Enable MPS fallback for unsupported ops (grid_sampler_2d used by kornia)
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import sys
@@ -23,487 +13,214 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import matplotlib.pyplot as plt
 from PIL import Image
 from torchvision import transforms
-import matplotlib.pyplot as plt
-from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from torch.utils.data import Dataset, DataLoader
 import argparse
 import time
 from tqdm import tqdm
+from models.dinov3_loader import load_dinov3
 
+def get_device() -> torch.device:
+    if torch.cuda.is_available(): return torch.device('cuda')
+    if torch.backends.mps.is_available(): return torch.device('mps')
+    return torch.device('cpu')
 
-# =========================
-# Dataset
-# =========================
+def load_model(device: torch.device) -> nn.Module:
+    w: Path = Path(__file__).parent.parent / "src/models/weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
+    m: nn.Module = load_dinov3(checkpoint_path=str(w), device=str(device))
+    m.eval()
+    for p in m.parameters(): p.requires_grad = False
+    return m
 
 class ImageDataset(Dataset):
-    """Dataset d'images pour l'entraînement du patch."""
-
-    def __init__(self, root_dir: str, transform=None, max_images: int = None):
-        self.root_dir = Path(root_dir).resolve()  # Chemin absolu
-        self.transform = transform
-
-        # Trouver toutes les images (exclure les répertoires)
-        extensions = ['*.jpg', '*.jpeg', '*.png', '*.webp']
-        self.image_paths = []
-        for ext in extensions:
-            for p in self.root_dir.glob(f'**/{ext}'):
-                if p.is_file():
-                    self.image_paths.append(p.resolve())  # Chemin absolu
-
-        if max_images:
-            self.image_paths = self.image_paths[:max_images]
-
-        print(f"Found {len(self.image_paths)} images in {root_dir}")
-
-    def __len__(self):
-        return len(self.image_paths)
-
-    def __getitem__(self, idx):
-        img_path = self.image_paths[idx]
-        image = Image.open(img_path).convert('RGB')
-
-        if self.transform:
-            image = self.transform(image)
-
-        return image
-
-
-# =========================
-# Modèle
-# =========================
-
-def load_model(device=None):
-    if device is None:
-        device = (
-            "cuda" if torch.cuda.is_available()
-            else "mps" if torch.backends.mps.is_available()
-            else "cpu"
+    def __init__(self, root_dir: str, transform: transforms.Compose | None = None, max_images: int | None = None):
+        self.transform: transforms.Compose | None = transform
+        root: Path = Path(root_dir).resolve()
+        self.paths: list[Path] = sorted(
+            p for ext in ['*.jpg', '*.jpeg', '*.png', '*.webp']
+            for p in root.glob(f'**/{ext}') if p.is_file()
         )
-    print(f"Device: {device}")
+        if max_images:
+            self.paths = self.paths[:max_images]
+        print(f"{len(self.paths)} images in {root_dir}")
 
-    dinov3_path = Path(__file__).parent.parent / "src" / "models" / "dinov3"
-    weights_path = Path(__file__).parent.parent / "src" / "models" / "weights" / "dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
+    def __len__(self) -> int:
+        return len(self.paths)
 
-    model = torch.hub.load(str(dinov3_path), "dinov3_vits16", source="local", pretrained=False)
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        img: Image.Image = Image.open(self.paths[idx]).convert('RGB')
+        return self.transform(img) if self.transform else transforms.ToTensor()(img)
 
-    if weights_path.exists():
-        checkpoint = torch.load(str(weights_path), map_location=device, weights_only=False)
-        model.load_state_dict(checkpoint, strict=True)
-        print("Weights loaded")
-
-    model.eval().to(device)
-    for p in model.parameters():
-        p.requires_grad = False
-
-    return model, device
-
-
-# =========================
-# Entraînement
-# =========================
-
-def apply_patch(images: torch.Tensor, patch: torch.Tensor, positions: list) -> torch.Tensor:
-    """Applique le patch sur un batch d'images."""
-    B = images.shape[0]
-    patched = images.clone()
-    ph, pw = patch.shape[1], patch.shape[2]
-
-    for i in range(B):
+def apply_patch(images: torch.Tensor, patch: torch.Tensor, positions: list[tuple[int, int]]) -> torch.Tensor:
+    out: torch.Tensor = images.clone()
+    ph: int = patch.shape[1]
+    pw: int = patch.shape[2]
+    for i in range(images.shape[0]):
         x, y = positions[i]
-        x = max(0, min(x, images.shape[2] - ph))
-        y = max(0, min(y, images.shape[3] - pw))
-        patched[i, :, x:x+ph, y:y+pw] = patch
+        x, y = max(0, min(x, images.shape[2]-ph)), max(0, min(y, images.shape[3]-pw))
+        out[i, :, x:x+ph, y:y+pw] = patch
+    return out
 
-    return patched
+def random_positions(batch_size: int, patch_size: int, img_size: int = 224) -> list[tuple[int, int]]:
+    m: int = img_size - patch_size
+    return [(np.random.randint(0, m+1), np.random.randint(0, m+1)) for _ in range(batch_size)]
 
-
-def random_positions(batch_size: int, patch_size: int, img_size: int = 224) -> list:
-    """Génère des positions aléatoires pour le patch."""
-    max_pos = img_size - patch_size
-    positions = []
-    for _ in range(batch_size):
-        x = np.random.randint(0, max_pos + 1)
-        y = np.random.randint(0, max_pos + 1)
-        positions.append((x, y))
-    return positions
-
-
-def apply_eot_transforms(patch: torch.Tensor, device: str) -> torch.Tensor:
-    """Applique des transformations EOT au patch."""
-    # Rotation aléatoire
-    angle = torch.empty(1).uniform_(-30, 30).item()
-
-    # Échelle aléatoire
-    scale = torch.empty(1).uniform_(0.8, 1.2).item()
-
-    # Brightness/contrast
-    brightness = torch.empty(1).uniform_(-0.1, 0.1).to(device)
-    contrast = torch.empty(1).uniform_(0.9, 1.1).to(device)
-
-    # Appliquer
-    transformed = patch.clone()
-
-    # Rotation (simple, sans kornia pour éviter dépendances)
+def apply_eot(patch: torch.Tensor, device: torch.device) -> torch.Tensor:
+    angle: float = torch.empty(1).uniform_(-30, 30).item()
+    brightness: torch.Tensor = torch.empty(1).uniform_(-0.1, 0.1).to(device)
+    contrast: torch.Tensor = torch.empty(1).uniform_(0.9, 1.1).to(device)
+    t: torch.Tensor = patch.clone()
     if abs(angle) > 5:
-        # Utiliser grid_sample pour rotation
-        theta = torch.tensor([
+        theta: torch.Tensor = torch.tensor([
             [np.cos(np.radians(angle)), -np.sin(np.radians(angle)), 0],
             [np.sin(np.radians(angle)), np.cos(np.radians(angle)), 0]
         ], dtype=torch.float32, device=device).unsqueeze(0)
+        grid: torch.Tensor = F.affine_grid(theta, t.unsqueeze(0).size(), align_corners=False)
+        t = F.grid_sample(t.unsqueeze(0), grid, align_corners=False).squeeze(0)
+    mean: torch.Tensor = t.mean()
+    t = (t - mean) * contrast + mean + brightness
+    return t.clamp(0, 1)
 
-        grid = F.affine_grid(theta, transformed.unsqueeze(0).size(), align_corners=False)
-        transformed = F.grid_sample(transformed.unsqueeze(0), grid, align_corners=False).squeeze(0)
+def train(model: nn.Module, dataloader: DataLoader, device: torch.device,
+          patch_size: int = 32, steps: int = 2000, lr: float = 0.05,
+          use_eot: bool = False, n_eot: int = 4, resume_patch: torch.Tensor | None = None,
+          save_every: int = 500, output_dir: str = "results") -> dict:
+    out_dir: Path = Path(output_dir)
+    out_dir.mkdir(exist_ok=True)
 
-    # Brightness/contrast
-    mean = transformed.mean()
-    transformed = (transformed - mean) * contrast + mean + brightness
-
-    return transformed.clamp(0, 1)
-
-
-def train_on_dataset(
-    model,
-    dataloader: DataLoader,
-    device: str,
-    patch_size: int = 32,
-    steps: int = 2000,
-    lr: float = 0.05,
-    use_eot: bool = False,
-    n_eot: int = 4,
-    resume_patch: torch.Tensor = None,
-    save_every: int = 500,
-    output_dir: str = "results",
-) -> dict:
-    """
-    Entraîne un patch universel sur un dataset.
-
-    Args:
-        model: Modèle DINOv3
-        dataloader: DataLoader du dataset
-        device: Device
-        patch_size: Taille du patch
-        steps: Nombre de steps
-        lr: Learning rate
-        use_eot: Utiliser EOT
-        n_eot: Nombre de transformations EOT par step
-        resume_patch: Patch existant pour reprendre
-        save_every: Sauvegarder tous les N steps
-        output_dir: Dossier de sortie
-    """
-    output_dir = Path(output_dir)
-    output_dir.mkdir(exist_ok=True)
-
-    print(f"\n{'='*50}")
-    print(f"Training universal patch on dataset")
-    print(f"{'='*50}")
-    print(f"  Patch size: {patch_size}x{patch_size}")
-    print(f"  Steps: {steps}")
-    print(f"  LR: {lr}")
-    print(f"  EOT: {use_eot} (n={n_eot})")
-    print(f"  Batch size: {dataloader.batch_size}")
-    print(f"  Dataset size: {len(dataloader.dataset)}")
-    print()
-
-    # Initialiser ou reprendre le patch
     if resume_patch is not None:
-        patch = resume_patch.clone().to(device)
+        patch: torch.Tensor = resume_patch.clone().to(device)
         patch.requires_grad = True
         print("Resuming from existing patch")
     else:
         patch = torch.rand(3, patch_size, patch_size, device=device, requires_grad=True)
 
-    optimizer = torch.optim.Adam([patch], lr=lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=steps)
+    opt: torch.optim.Adam = torch.optim.Adam([patch], lr=lr)
+    sched: torch.optim.lr_scheduler.CosineAnnealingLR = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps)
 
-    # Historique
-    history = {'mse': [], 'step': []}
-    best_mse = 0
-    best_patch = patch.detach().clone()
+    history: list[float] = []
+    best_mse: float = 0.0
+    best_patch: torch.Tensor = patch.detach().clone()
+    data_iter: iter = iter(dataloader)
+    start: float = time.time()
 
-    # Itérateur infini sur le dataset
-    data_iter = iter(dataloader)
-
-    start_time = time.time()
-
-    pbar = tqdm(range(steps), desc="Training")
-    for step in pbar:
-        # Obtenir un batch
+    for step in tqdm(range(steps), desc="Training"):
         try:
-            images = next(data_iter)
+            images: torch.Tensor = next(data_iter)
         except StopIteration:
             data_iter = iter(dataloader)
             images = next(data_iter)
-
         images = images.to(device)
-        batch_size = images.shape[0]
+        bs: int = images.shape[0]
+        positions: list[tuple[int, int]] = random_positions(bs, patch_size)
 
-        optimizer.zero_grad()
-        total_loss = 0.0
-        n_samples = 0
-
-        # Positions aléatoires pour ce batch
-        positions = random_positions(batch_size, patch_size)
-
-        # Tokens de référence (sans patch)
         with torch.no_grad():
-            ref_features = model.get_intermediate_layers(images, n=1)[0]
-            ref_tokens = F.normalize(ref_features[:, 1:], dim=-1)
+            ref_tokens: torch.Tensor = F.normalize(model.get_intermediate_layers(images, n=1)[0][:, 1:], dim=-1)
 
-        if use_eot:
-            # Avec EOT: plusieurs transformations par step
-            for _ in range(n_eot):
-                transformed_patch = apply_eot_transforms(patch, device)
-                patched_images = apply_patch(images, transformed_patch, positions)
+        opt.zero_grad()
+        total_loss: torch.Tensor = torch.tensor(0.0, device=device)
+        n: int = 0
 
-                adv_features = model.get_intermediate_layers(patched_images, n=1)[0]
-                adv_tokens = F.normalize(adv_features[:, 1:], dim=-1)
+        for _ in range(n_eot if use_eot else 1):
+            p: torch.Tensor = apply_eot(patch, device) if use_eot else patch
+            patched: torch.Tensor = apply_patch(images, p, positions)
+            adv_tokens: torch.Tensor = F.normalize(model.get_intermediate_layers(patched, n=1)[0][:, 1:], dim=-1)
+            for b in range(bs):
+                total_loss += -F.mse_loss(adv_tokens[b], ref_tokens[b])
+                n += 1
 
-                # Loss par image
-                for b in range(batch_size):
-                    loss = -F.mse_loss(adv_tokens[b], ref_tokens[b])
-                    total_loss += loss
-                    n_samples += 1
-        else:
-            # Sans EOT
-            patched_images = apply_patch(images, patch, positions)
-
-            adv_features = model.get_intermediate_layers(patched_images, n=1)[0]
-            adv_tokens = F.normalize(adv_features[:, 1:], dim=-1)
-
-            for b in range(batch_size):
-                loss = -F.mse_loss(adv_tokens[b], ref_tokens[b])
-                total_loss += loss
-                n_samples += 1
-
-        total_loss /= n_samples
-        total_loss.backward()
-        optimizer.step()
-        scheduler.step()
+        (total_loss / n).backward()
+        opt.step(); sched.step()
         patch.data.clamp_(0, 1)
 
-        mse = -total_loss.item()
-
+        mse: float = -total_loss.item() / n
+        history.append(mse)
         if mse > best_mse:
             best_mse = mse
             best_patch = patch.detach().clone()
 
-        # Logging
-        history['mse'].append(mse)
-        history['step'].append(step)
-
-        pbar.set_postfix({
-            'MSE': f'{mse:.6f}',
-            'Best': f'{best_mse:.6f}',
-            'LR': f'{scheduler.get_last_lr()[0]:.5f}'
-        })
-
-        # Sauvegarder périodiquement
         if (step + 1) % save_every == 0:
-            checkpoint_path = output_dir / f"patch_step{step+1}.pt"
-            torch.save(patch.detach(), checkpoint_path)
-            tqdm.write(f"  Checkpoint saved: {checkpoint_path}")
+            torch.save(patch.detach(), out_dir / f"patch_step{step+1}.pt")
 
-    elapsed = time.time() - start_time
-    print(f"\n{'='*50}")
-    print(f"Training complete!")
-    print(f"  Time: {elapsed:.1f}s ({elapsed/steps*1000:.1f}ms/step)")
-    print(f"  Best MSE: {best_mse:.6f}")
-    print(f"{'='*50}")
+    elapsed: float = time.time() - start
+    print(f"Done in {elapsed:.1f}s | Best MSE: {best_mse:.6f}")
+    return {'patch': best_patch, 'history': history, 'best_mse': best_mse}
 
-    return {
-        'patch': best_patch,
-        'history': history,
-        'best_mse': best_mse,
-    }
+def visualize_results(result: dict, model: nn.Module, dataloader: DataLoader,
+                      device: torch.device, output_path: str, n_clusters: int = 4) -> None:
+    patch: torch.Tensor = result['patch']
+    history: list[float] = result['history']
+    images: torch.Tensor = next(iter(dataloader))[:4].to(device)
+    positions: list[tuple[int, int]] = [(50, 50)] * 4
+    patched: torch.Tensor = apply_patch(images, patch, positions)
 
-
-# =========================
-# Visualisation
-# =========================
-
-def visualize_results(result: dict, model, dataloader, device, output_path: str, n_clusters: int = 4):
-    """Visualise les résultats de l'entraînement."""
-    patch = result['patch']
-    history = result['history']
-
-    # Prendre quelques images du dataset
-    images = next(iter(dataloader))[:4].to(device)
-
-    # Appliquer le patch
-    positions = [(50, 50)] * 4  # Position fixe pour la viz
-    patched_images = apply_patch(images, patch, positions)
-
-    fig = plt.figure(figsize=(16, 12))
-
-    # Row 1: Images originales vs avec patch
+    fig: plt.Figure = plt.figure(figsize=(16, 12))
     for i in range(4):
-        ax = fig.add_subplot(3, 4, i + 1)
-        img = images[i].cpu().permute(1, 2, 0).numpy()
-        ax.imshow(img)
-        ax.set_title(f"Original {i+1}")
-        ax.axis('off')
+        fig.add_subplot(3, 4, i+1)
+        plt.imshow(images[i].cpu().permute(1, 2, 0).numpy()); plt.title(f"Original {i+1}"); plt.axis('off')
+        fig.add_subplot(3, 4, i+5)
+        plt.imshow(np.clip(patched[i].detach().cpu().permute(1, 2, 0).numpy(), 0, 1)); plt.title(f"Patched {i+1}"); plt.axis('off')
 
-    for i in range(4):
-        ax = fig.add_subplot(3, 4, i + 5)
-        img = patched_images[i].detach().cpu().permute(1, 2, 0).numpy()
-        ax.imshow(np.clip(img, 0, 1))
-        ax.set_title(f"With Patch {i+1}")
-        ax.axis('off')
+    fig.add_subplot(3, 4, 9)
+    plt.imshow(np.clip(patch.cpu().permute(1, 2, 0).numpy(), 0, 1)); plt.title("Patch"); plt.axis('off')
+    fig.add_subplot(3, 4, 10)
+    plt.plot(history, 'b-', linewidth=0.5); plt.xlabel('Step'); plt.ylabel('MSE')
+    plt.title(f"MSE: {result['best_mse']:.6f}"); plt.grid(True, alpha=0.3)
 
-    # Row 3: Patch + training curve
-    ax = fig.add_subplot(3, 4, 9)
-    patch_img = patch.cpu().permute(1, 2, 0).numpy()
-    ax.imshow(np.clip(patch_img, 0, 1))
-    ax.set_title(f"Adversarial Patch\n{patch.shape[1]}x{patch.shape[2]}")
-    ax.axis('off')
-
-    ax = fig.add_subplot(3, 4, 10)
-    ax.plot(history['step'], history['mse'], 'b-', linewidth=0.5)
-    ax.set_xlabel('Step')
-    ax.set_ylabel('MSE')
-    ax.set_title(f"Training Curve\nFinal: {result['best_mse']:.6f}")
-    ax.grid(True, alpha=0.3)
-
-    # Segmentation comparison
     with torch.no_grad():
-        ref_features = model.get_intermediate_layers(images[:1], n=1)[0]
-        ref_tokens = F.normalize(ref_features[0, 1:], dim=-1)
+        ref: np.ndarray = F.normalize(model.get_intermediate_layers(images[:1], n=1)[0][0, 1:], dim=-1).cpu().numpy()
+        adv: np.ndarray = F.normalize(model.get_intermediate_layers(patched[:1], n=1)[0][0, 1:], dim=-1).cpu().numpy()
 
-        adv_features = model.get_intermediate_layers(patched_images[:1], n=1)[0]
-        adv_tokens = F.normalize(adv_features[0, 1:], dim=-1)
+    km: KMeans = KMeans(n_clusters=n_clusters, n_init=3, random_state=42)
+    fig.add_subplot(3, 4, 11)
+    plt.imshow(np.kron(km.fit_predict(ref[:196]).reshape(14, 14), np.ones((16, 16))), cmap='tab10')
+    plt.title("Seg Original"); plt.axis('off')
+    fig.add_subplot(3, 4, 12)
+    plt.imshow(np.kron(km.fit_predict(adv[:196]).reshape(14, 14), np.ones((16, 16))), cmap='tab10')
+    plt.title("Seg Attacked"); plt.axis('off')
 
-    kmeans = KMeans(n_clusters=n_clusters, n_init=3, random_state=42)
-    ref_np = ref_tokens.cpu().numpy()
-    adv_np = adv_tokens.cpu().numpy()
-    # Pad to 196 if needed (some models have 195 tokens)
-    if len(ref_np) < 196:
-        ref_np = np.vstack([ref_np, np.zeros((196 - len(ref_np), ref_np.shape[1]))])
-        adv_np = np.vstack([adv_np, np.zeros((196 - len(adv_np), adv_np.shape[1]))])
-    labels_ref = kmeans.fit_predict(ref_np[:196]).reshape(14, 14)
-    labels_adv = kmeans.fit_predict(adv_np[:196]).reshape(14, 14)
+    plt.tight_layout(); plt.savefig(output_path, dpi=150, bbox_inches='tight'); plt.close()
+    print(f"Visualization saved to {output_path}")
 
-    ax = fig.add_subplot(3, 4, 11)
-    ax.imshow(np.kron(labels_ref, np.ones((16, 16))), cmap='tab10')
-    ax.set_title("Segmentation (Original)")
-    ax.axis('off')
+def main() -> None:
+    parser: argparse.ArgumentParser = argparse.ArgumentParser()
+    parser.add_argument('--dataset', required=True)
+    parser.add_argument('--patch-size', type=int, default=32)
+    parser.add_argument('--steps', type=int, default=2000)
+    parser.add_argument('--lr', type=float, default=0.05)
+    parser.add_argument('--batch-size', type=int, default=8)
+    parser.add_argument('--max-images', type=int, default=None)
+    parser.add_argument('--eot', action='store_true')
+    parser.add_argument('--n-eot', type=int, default=4)
+    parser.add_argument('--resume', default=None)
+    parser.add_argument('--output', default='results')
+    parser.add_argument('--clusters', type=int, default=4)
+    parser.add_argument('--save-every', type=int, default=500)
+    args: argparse.Namespace = parser.parse_args()
 
-    ax = fig.add_subplot(3, 4, 12)
-    ax.imshow(np.kron(labels_adv, np.ones((16, 16))), cmap='tab10')
-    ax.set_title("Segmentation (Attacked)")
-    ax.axis('off')
+    device: torch.device = get_device()
+    print(f"Device: {device}")
+    model: nn.Module = load_model(device)
 
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"\nVisualization saved to {output_path}")
-    plt.close()
+    tf: transforms.Compose = transforms.Compose([transforms.Resize(256), transforms.CenterCrop(224), transforms.ToTensor()])
+    dataset: ImageDataset = ImageDataset(args.dataset, tf, args.max_images)
+    loader: DataLoader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
 
+    resume_patch: torch.Tensor | None = torch.load(args.resume, map_location=device, weights_only=False) if args.resume else None
 
-# =========================
-# Main
-# =========================
+    result: dict = train(model, loader, device, patch_size=args.patch_size, steps=args.steps,
+                         lr=args.lr, use_eot=args.eot, n_eot=args.n_eot, resume_patch=resume_patch,
+                         save_every=args.save_every, output_dir=args.output)
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Train adversarial patch on dataset',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Basic training
-  python scripts/train_dataset.py --dataset data/Birds
-
-  # With EOT for robustness
-  python scripts/train_dataset.py --dataset data/Birds --eot
-
-  # Longer training, larger patch
-  python scripts/train_dataset.py --dataset data/Birds --patch-size 32 --steps 3000
-
-  # Resume training
-  python scripts/train_dataset.py --dataset data/Birds --resume results/patch.pt
-        """
-    )
-
-    parser.add_argument('--dataset', type=str, required=True,
-                       help='Path to dataset directory')
-    parser.add_argument('--patch-size', type=int, default=32,
-                       help='Patch size (default 24)')
-    parser.add_argument('--steps', type=int, default=2000,
-                       help='Training steps (default 2000)')
-    parser.add_argument('--lr', type=float, default=0.05,
-                       help='Learning rate (default 0.05)')
-    parser.add_argument('--batch-size', type=int, default=8,
-                       help='Batch size (default 8)')
-    parser.add_argument('--max-images', type=int, default=None,
-                       help='Max images to use (default: all)')
-
-    parser.add_argument('--eot', action='store_true',
-                       help='Use EOT augmentations')
-    parser.add_argument('--n-eot', type=int, default=4,
-                       help='Number of EOT transforms per step')
-
-    parser.add_argument('--resume', type=str, default=None,
-                       help='Resume from checkpoint')
-    parser.add_argument('--output', type=str, default='results',
-                       help='Output directory')
-    parser.add_argument('--clusters', type=int, default=4,
-                       help='Number of K-means clusters for segmentation visualization')
-    parser.add_argument('--save-every', type=int, default=500,
-                       help='Save checkpoint every N steps')
-
-    args = parser.parse_args()
-
-    # Load model
-    model, device = load_model()
-
-    # Transform
-    transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-    ])
-
-    # Dataset
-    dataset = ImageDataset(args.dataset, transform, args.max_images)
-    dataloader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=0,  # MPS doesn't support multiprocessing well
-        drop_last=True,
-    )
-
-    # Resume patch
-    resume_patch = None
-    if args.resume:
-        resume_patch = torch.load(args.resume, map_location=device)
-        print(f"Resuming from {args.resume}")
-
-    # Train
-    result = train_on_dataset(
-        model, dataloader, device,
-        patch_size=args.patch_size,
-        steps=args.steps,
-        lr=args.lr,
-        use_eot=args.eot,
-        n_eot=args.n_eot,
-        resume_patch=resume_patch,
-        save_every=args.save_every,
-        output_dir=args.output,
-    )
-
-    # Save final patch
-    final_path = Path(args.output) / "universal_patch_final.pt"
-    torch.save(result['patch'], final_path)
-    print(f"\nFinal patch saved to {final_path}")
-
-    # Visualize
-    viz_path = Path(args.output) / "training_results.png"
-    visualize_results(result, model, dataloader, device, str(viz_path), n_clusters=args.clusters)
-
+    torch.save(result['patch'], Path(args.output) / "universal_patch_final.pt")
+    print(f"Patch saved to {args.output}/universal_patch_final.pt")
+    visualize_results(result, model, loader, device, str(Path(args.output) / "training_results.png"), n_clusters=args.clusters)
 
 if __name__ == "__main__":
     main()

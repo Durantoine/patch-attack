@@ -1,8 +1,9 @@
-import torch
 from pathlib import Path
 
+import torch
 
-def load_dinov3(checkpoint_path=None, model_name='dinov3_vits16', device='cuda'):
+
+def load_dinov3(checkpoint_path=None, model_name="dinov3_vits16", device="cuda"):
     """Load DINOv3 model from local repository.
 
     Args:
@@ -13,17 +14,12 @@ def load_dinov3(checkpoint_path=None, model_name='dinov3_vits16', device='cuda')
     Returns:
         DINOv3 model ready for inference
     """
-    repo_path = Path(__file__).parent / 'dinov3'
+    repo_path = Path(__file__).parent / "dinov3"
 
     if checkpoint_path is None:
-        checkpoint_path = repo_path / f'{model_name}.pth'
+        checkpoint_path = repo_path / f"{model_name}.pth"
 
-    model = torch.hub.load(
-        str(repo_path),
-        model_name,
-        source='local',
-        pretrained=False
-    )
+    model = torch.hub.load(str(repo_path), model_name, source="local", pretrained=False)
 
     if Path(checkpoint_path).exists():
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)

@@ -21,9 +21,15 @@ from torchvision import transforms
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 import argparse
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 from models.dinov3_loader import load_dinov3
+from utils.viz import CLASS_NAMES, CITYSCAPES_COLORS, CLASS_NAMES_SHORT, OTHER_COLOR, create_legend
+from utils.config import (
+    DATASET, PATCH_SIZE, PATCH_POS, VIZ_SEQ_SIZE, CLUSTERS, FPS, REFRESH,
+    CLASSIFIER, SOURCE_CLASS, TARGET_CLASS, FOCUS_CLASSES, PATCH_PERSPECTIVE_MIN_SCALE,
+)
 
 
 def get_device():
@@ -67,7 +73,33 @@ def apply_patch(image, patch, pos):
     return patched
 
 
-def create_visualization(tokens, size=224, smooth=True, pca_model=None, global_min=None, global_max=None):
+def resize_patch(patch: torch.Tensor, size: int) -> torch.Tensor:
+    """Resize patch tensor to given size."""
+    return F.interpolate(
+        patch.unsqueeze(0), size=(size, size), mode='bilinear', align_corners=False
+    ).squeeze(0)
+
+
+def compute_perspective_size(x: int, img_size: int, max_size: int, min_scale: float) -> int:
+    """Effective patch size based on vertical position: smaller higher up (farther from camera)."""
+    t = min(1.0, (x + max_size / 2) / img_size)
+    scale = min_scale + (1.0 - min_scale) * t
+    return max(1, int(max_size * scale))
+
+
+def get_distance_configs(img_size: int, patch_size: int, min_scale: float) -> list[dict]:
+    """Three roadside patch configs at far / medium / near distances."""
+    y_road = int(img_size * 0.55)  # right-centre of road
+    configs = []
+    for name, x_ratio in [("Loin", 0.15), ("Moyen", 0.45), ("Proche", 0.72)]:
+        x = int(img_size * x_ratio)
+        eff = compute_perspective_size(x, img_size, patch_size, min_scale)
+        y = min(y_road, img_size - eff - 1)
+        configs.append({"name": name, "x": x, "y": y, "size": eff})
+    return configs
+
+
+def create_visualization(tokens, size=224, smooth=True, pca_model=None, global_min=None, global_max=None, grid=14):
     """Create PCA visualization from tokens.
 
     Returns: (vis_image, pca_model, min_vals, max_vals)
@@ -92,13 +124,12 @@ def create_visualization(tokens, size=224, smooth=True, pca_model=None, global_m
     tokens_3d = np.clip(tokens_3d, 0, 1)
     colors = (tokens_3d * 255).astype(np.uint8)
 
-    h_patches = w_patches = 14
-    n_patches = h_patches * w_patches
+    n_patches = grid * grid
 
     if len(colors) < n_patches:
         colors = np.vstack([colors, np.zeros((n_patches - len(colors), 3), dtype=np.uint8)])
 
-    vis = colors[:n_patches].reshape(h_patches, w_patches, 3)
+    vis = colors[:n_patches].reshape(grid, grid, 3)
     interp = cv2.INTER_CUBIC if smooth else cv2.INTER_NEAREST
     vis = cv2.resize(vis, (size, size), interpolation=interp)
     return vis, pca_model, global_min, global_max
@@ -218,20 +249,19 @@ def generate_colors(n):
     return np.array(colors, dtype=np.uint8)
 
 
-def create_segment_vis(labels, size=224, smooth=False):
+def create_segment_vis(labels, size=224, smooth=False, grid=14):
     """Create segmentation visualization."""
-    h_patches = w_patches = 14
-    n_patches = h_patches * w_patches
+    n_patches = grid * grid
 
     if len(labels) < n_patches:
         labels = np.concatenate([labels, np.zeros(n_patches - len(labels), dtype=labels.dtype)])
 
-    seg_map = labels[:n_patches].reshape(h_patches, w_patches)
+    seg_map = labels[:n_patches].reshape(grid, grid)
 
     n_labels = int(labels.max()) + 1
     colors = generate_colors(n_labels)
 
-    seg_colored = np.zeros((h_patches, w_patches, 3), dtype=np.uint8)
+    seg_colored = np.zeros((grid, grid, 3), dtype=np.uint8)
     for i in range(n_labels):
         mask = seg_map == i
         seg_colored[mask] = colors[i]
@@ -241,13 +271,12 @@ def create_segment_vis(labels, size=224, smooth=False):
     return seg_colored, seg_map
 
 
-def create_segment_diff(labels_ref, labels_adv, size=224, smooth=False):
+def create_segment_diff(labels_ref, labels_adv, size=224, smooth=False, grid=14):
     """Create segmentation difference visualization.
 
     Direct comparison without label permutation (assumes consistent K-means model).
     """
-    h_patches = w_patches = 14
-    n_patches = h_patches * w_patches
+    n_patches = grid * grid
 
     # Pad labels if needed
     if len(labels_ref) < n_patches:
@@ -260,10 +289,10 @@ def create_segment_diff(labels_ref, labels_adv, size=224, smooth=False):
 
     # Direct comparison (no permutation needed with global K-means)
     diff = (labels_ref != labels_adv).astype(np.uint8)
-    diff_map = diff.reshape(h_patches, w_patches)
+    diff_map = diff.reshape(grid, grid)
 
     # Create colored diff (green=same, red=changed)
-    diff_colored = np.zeros((h_patches, w_patches, 3), dtype=np.uint8)
+    diff_colored = np.zeros((grid, grid, 3), dtype=np.uint8)
     diff_colored[diff_map == 0] = [50, 150, 50]   # Green = unchanged
     diff_colored[diff_map == 1] = [255, 50, 50]   # Red = changed
 
@@ -275,20 +304,83 @@ def create_segment_diff(labels_ref, labels_adv, size=224, smooth=False):
     return diff_colored, changed_pct, match_pct / 100
 
 
+def create_classifier_vis(tokens, clf, size=224, smooth=False, grid=14, focus_classes=None):
+    """Create semantic segmentation from classifier predictions.
+
+    If focus_classes is set, only those classes are colored; the rest is gray.
+    """
+    with torch.no_grad():
+        preds = clf(tokens).argmax(-1).cpu().numpy()
+    n = grid * grid
+    if len(preds) < n:
+        preds = np.concatenate([preds, np.full(n - len(preds), preds[-1])])
+    seg = preds[:n].reshape(grid, grid)
+    colored = np.zeros((grid, grid, 3), dtype=np.uint8)
+    if focus_classes is not None:
+        colored[:] = OTHER_COLOR
+        for i in focus_classes:
+            colored[seg == i] = CITYSCAPES_COLORS[i]
+    else:
+        for i in range(19):
+            colored[seg == i] = CITYSCAPES_COLORS[i]
+    interp = cv2.INTER_CUBIC if smooth else cv2.INTER_NEAREST
+    vis = cv2.resize(colored, (size, size), interpolation=interp)
+    return vis, preds[:n]
+
+
+def create_classifier_diff(preds_ref, preds_adv, source_class, target_class, size=224, smooth=False, grid=14):
+    """Show where source_class tokens changed to target_class."""
+    n = grid * grid
+    if len(preds_ref) < n:
+        preds_ref = np.concatenate([preds_ref, np.full(n - len(preds_ref), preds_ref[-1])])
+    if len(preds_adv) < n:
+        preds_adv = np.concatenate([preds_adv, np.full(n - len(preds_adv), preds_adv[-1])])
+
+    diff = np.zeros((grid, grid, 3), dtype=np.uint8)
+    ref_map = preds_ref[:n].reshape(grid, grid)
+    adv_map = preds_adv[:n].reshape(grid, grid)
+
+    diff[:] = [50, 50, 50]  # Gray = not source class
+    source_mask = ref_map == source_class
+    diff[source_mask] = [50, 200, 50]  # Green = source class unchanged
+    if target_class == -1:
+        fooled = source_mask & (adv_map != source_class)
+    else:
+        fooled = source_mask & (adv_map == target_class)
+    diff[fooled] = [255, 50, 50]  # Red = successfully fooled
+
+    interp = cv2.INTER_CUBIC if smooth else cv2.INTER_NEAREST
+    diff = cv2.resize(diff, (size, size), interpolation=interp)
+
+    n_source = source_mask.sum()
+    n_fooled = fooled.sum()
+    fr = n_fooled / n_source * 100 if n_source > 0 else 0
+    return diff, fr, n_source
+
+
 def main():
     parser = argparse.ArgumentParser(description='Visualize patch attack on image sequence')
-    parser.add_argument('--dataset', type=str, required=True, help='Path to image folder')
-    parser.add_argument('--patch', type=str, required=True, help='Path to trained patch (.pt)')
-    parser.add_argument('--patch-size', type=int, default=32, help='Patch size')
-    parser.add_argument('--patch-pos', type=int, nargs=2, default=[50, 50], help='Patch position (x, y)')
-    parser.add_argument('--output', type=str, default=None, help='Output video path (optional)')
-    parser.add_argument('--size', type=int, default=300, help='Visualization size')
-    parser.add_argument('--mode', choices=['pca', 'segment', 'both', 'trajectory', 'all'], default='all', help='Visualization mode')
-    parser.add_argument('--clusters', type=int, default=4, help='Number of clusters for segmentation')
-    parser.add_argument('--fps', type=int, default=10, help='Output video FPS')
-    parser.add_argument('--smooth', action='store_true', help='Use smooth interpolation (default: sharp/nearest)')
-    parser.add_argument('--refresh', type=int, default=50, help='Refresh models every N frames (for changing scenes)')
+    parser.add_argument('--dataset', type=str, default=DATASET)
+    parser.add_argument('--patch', type=str, required=True)
+    parser.add_argument('--patch-size', type=int, default=PATCH_SIZE)
+    parser.add_argument('--patch-pos', type=int, nargs=2, default=PATCH_POS)
+    parser.add_argument('--output', type=str, default=None)
+    parser.add_argument('--size', type=int, default=VIZ_SEQ_SIZE)
+    parser.add_argument('--mode', choices=['pca', 'segment', 'both', 'trajectory', 'all', 'classifier', 'multi'], default='all')
+    parser.add_argument('--perspective-min-scale', type=float, default=PATCH_PERSPECTIVE_MIN_SCALE,
+                        help='Min patch scale at top of image for multi mode')
+    parser.add_argument('--clusters', type=int, default=CLUSTERS)
+    parser.add_argument('--fps', type=int, default=FPS)
+    parser.add_argument('--smooth', action='store_true')
+    parser.add_argument('--refresh', type=int, default=REFRESH)
+    parser.add_argument('--classifier', type=str, default=CLASSIFIER)
+    parser.add_argument('--source-class', type=int, default=SOURCE_CLASS)
+    parser.add_argument('--target-class', type=int, default=TARGET_CLASS)
+    parser.add_argument('--focus-classes', type=int, nargs='+', default=FOCUS_CLASSES,
+                       help='Only color these classes, gray for rest. Use -1 for all.')
     args = parser.parse_args()
+
+    focus_classes = None if args.focus_classes == [-1] else args.focus_classes
 
     # Load model
     print("Loading model...")
@@ -306,10 +398,38 @@ def main():
 
     print(f"Patch shape: {patch.shape}")
 
+    # Load classifier if needed
+    clf = None
+    img_size = 224
+    if args.classifier:
+        import torch.nn as nn
+        clf_data = torch.load(args.classifier, map_location=device, weights_only=False)
+        clf = nn.Linear(384, 19).to(device)
+        clf.load_state_dict(clf_data['state_dict'])
+        clf.eval()
+        img_size = clf_data.get('img_size', 224)
+    elif args.mode in ('classifier', 'multi'):
+        print("Error: --classifier required for classifier/multi mode")
+        return
+    grid = img_size // 16
+
+    # Multi-distance setup
+    dist_configs = None
+    fooling_history = None
+    disappeared_frames = None
+    if args.mode == 'multi':
+        dist_configs = get_distance_configs(img_size, args.patch_size, args.perspective_min_scale)
+        fooling_history = [[] for _ in dist_configs]
+        disappeared_frames = [[] for _ in dist_configs]
+        print("Multi-distance configs:")
+        for d in dist_configs:
+            print(f"  {d['name']:8s}: row={d['x']}, col={d['y']}, size={d['size']}px")
+    print(f"Image size: {img_size}x{img_size} -> {grid}x{grid} tokens")
+
     # Transform
     transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
+        transforms.Resize(img_size + 32),
+        transforms.CenterCrop(img_size),
         transforms.ToTensor(),
     ])
 
@@ -330,8 +450,11 @@ def main():
     if args.mode == 'all':
         width = args.size * 4   # 4 columns
         height = args.size * 2  # 2 rows
-    elif args.mode == 'both' or args.mode == 'segment':
-        width = args.size * 4  # Original | Ref | Adv | Diff/Distance
+    elif args.mode in ('classifier', 'multi'):
+        width = args.size * 4 + args.size // 2  # ref + 3 dist + legend
+        height = args.size
+    elif args.mode in ('both', 'segment'):
+        width = args.size * 4  # 4 panels
         height = args.size
     elif args.mode == 'trajectory':
         width = args.size * 2  # Image | Trajectory plot
@@ -356,6 +479,9 @@ def main():
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         video_writer = cv2.VideoWriter(args.output, fourcc, args.fps, (width, height))
         print(f"Saving video to {args.output}")
+
+    cv2.namedWindow('Patch Attack Visualization', cv2.WINDOW_NORMAL)
+    cv2.moveWindow('Patch Attack Visualization', 100, 100)
 
     # Process images
     print("\nProcessing images...")
@@ -387,7 +513,7 @@ def main():
         img_display = cv2.cvtColor(img_display, cv2.COLOR_RGB2BGR)
 
         # Draw patch rectangle
-        scale = size / 224
+        scale = size / img_size
         px, py = int(patch_pos[1] * scale), int(patch_pos[0] * scale)
         ps = int(args.patch_size * scale)
         cv2.rectangle(img_display, (px, py), (px + ps, py + ps), (0, 255, 0), 2)
@@ -404,11 +530,11 @@ def main():
         if args.mode == 'pca' or args.mode == 'both' or args.mode == 'all':
             ref_pca, global_pca_vis, global_pca_min, global_pca_max = create_visualization(
                 tokens_ref, size, smooth=args.smooth,
-                pca_model=global_pca_vis, global_min=global_pca_min, global_max=global_pca_max
+                pca_model=global_pca_vis, global_min=global_pca_min, global_max=global_pca_max, grid=grid
             )
             adv_pca, _, _, _ = create_visualization(
                 tokens_adv, size, smooth=args.smooth,
-                pca_model=global_pca_vis, global_min=global_pca_min, global_max=global_pca_max
+                pca_model=global_pca_vis, global_min=global_pca_min, global_max=global_pca_max, grid=grid
             )
             ref_pca = cv2.cvtColor(ref_pca, cv2.COLOR_RGB2BGR)
             adv_pca = cv2.cvtColor(adv_pca, cv2.COLOR_RGB2BGR)
@@ -417,9 +543,9 @@ def main():
             # Use global kmeans for consistent colors across frames
             ref_labels, global_kmeans = segment_tokens(tokens_ref, args.clusters, global_kmeans)
             adv_labels, _ = segment_tokens(tokens_adv, args.clusters, global_kmeans)
-            ref_seg, _ = create_segment_vis(ref_labels, size, smooth=args.smooth)
-            adv_seg, _ = create_segment_vis(adv_labels, size, smooth=args.smooth)
-            seg_diff, changed_pct, iou = create_segment_diff(ref_labels, adv_labels, size, smooth=args.smooth)
+            ref_seg, _ = create_segment_vis(ref_labels, size, smooth=args.smooth, grid=grid)
+            adv_seg, _ = create_segment_vis(adv_labels, size, smooth=args.smooth, grid=grid)
+            seg_diff, changed_pct, iou = create_segment_diff(ref_labels, adv_labels, size, smooth=args.smooth, grid=grid)
             ref_seg = cv2.cvtColor(ref_seg, cv2.COLOR_RGB2BGR)
             adv_seg = cv2.cvtColor(adv_seg, cv2.COLOR_RGB2BGR)
             seg_diff = cv2.cvtColor(seg_diff, cv2.COLOR_RGB2BGR)
@@ -429,12 +555,22 @@ def main():
                 tokens_ref, tokens_adv, size, pca_model=global_pca
             )
 
+        if args.mode == 'classifier':
+            ref_clf_vis, ref_clf_preds = create_classifier_vis(tokens_ref, clf, size, smooth=args.smooth, grid=grid, focus_classes=focus_classes)
+            adv_clf_vis, adv_clf_preds = create_classifier_vis(tokens_adv, clf, size, smooth=args.smooth, grid=grid, focus_classes=focus_classes)
+            clf_diff, fooling_rate, n_source = create_classifier_diff(
+                ref_clf_preds, adv_clf_preds, args.source_class, args.target_class, size, smooth=args.smooth, grid=grid)
+            present_classes = np.unique(np.concatenate([ref_clf_preds, adv_clf_preds]))
+            clf_legend = create_legend(size, present_classes, focus_classes=focus_classes)
+            ref_clf_vis = cv2.cvtColor(ref_clf_vis, cv2.COLOR_RGB2BGR)
+            adv_clf_vis = cv2.cvtColor(adv_clf_vis, cv2.COLOR_RGB2BGR)
+            clf_diff = cv2.cvtColor(clf_diff, cv2.COLOR_RGB2BGR)
+
         # Distance heatmap
-        h_patches = w_patches = 14
-        n_patches = h_patches * w_patches
+        n_patches = grid * grid
         if len(distances) < n_patches:
             distances = np.concatenate([distances, np.zeros(n_patches - len(distances))])
-        dist_map = distances[:n_patches].reshape(h_patches, w_patches)
+        dist_map = distances[:n_patches].reshape(grid, grid)
         interp = cv2.INTER_CUBIC if args.smooth else cv2.INTER_NEAREST
         dist_map = cv2.resize(dist_map, (size, size), interpolation=interp)
         dist_map = (dist_map / dist_map.max() * 255).astype(np.uint8)
@@ -498,6 +634,72 @@ def main():
             cv2.putText(frame, img_path.name, (10, 50),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
 
+        elif args.mode == 'classifier':
+            src_n = CLASS_NAMES[args.source_class]
+            tgt_n = "any" if args.target_class == -1 else CLASS_NAMES[args.target_class]
+            frame = np.hstack([img_display, ref_clf_vis, adv_clf_vis, clf_diff, clf_legend])
+            labels = ["Image+Patch", "Seg Original", "Seg Attacked", f"{src_n}→{tgt_n}"]
+            for i, label in enumerate(labels):
+                cv2.putText(frame, label, (i * size + 5, height - 8),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            cv2.putText(frame, f"Fooling: {fooling_rate:.1f}% ({n_source} tokens)", (10, 25),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(frame, img_path.name, (10, 50),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+
+        elif args.mode == 'multi':
+            ref_vis_m, ref_preds_m = create_classifier_vis(
+                tokens_ref, clf, size, smooth=args.smooth, grid=grid, focus_classes=focus_classes
+            )
+            ref_bgr = cv2.cvtColor(ref_vis_m, cv2.COLOR_RGB2BGR)
+            n_source = int((ref_preds_m == args.source_class).sum())
+
+            panels = [ref_bgr]
+            for di, dcfg in enumerate(dist_configs):
+                patch_d = resize_patch(patch, dcfg["size"])
+                patched_d = apply_patch(img_tensor, patch_d, (dcfg["x"], dcfg["y"]))
+                tokens_d = get_patch_tokens(model, patched_d)
+                adv_vis_d, adv_preds_d = create_classifier_vis(
+                    tokens_d, clf, size, smooth=args.smooth, grid=grid, focus_classes=focus_classes
+                )
+                adv_bgr = cv2.cvtColor(adv_vis_d, cv2.COLOR_RGB2BGR)
+
+                n_adv = int((adv_preds_d == args.source_class).sum())
+                fr_d = max(0.0, min(1.0, (n_source - n_adv) / n_source if n_source > 0 else 0.0))
+                gone = (n_adv == 0 and n_source > 0)
+
+                fooling_history[di].append(fr_d)
+                if gone:
+                    disappeared_frames[di].append(len(fooling_history[di]) - 1)
+
+                if gone:
+                    cv2.rectangle(adv_bgr, (0, 0), (size - 1, size - 1), (0, 0, 255), 4)
+                    cv2.putText(adv_bgr, "DISPARU!", (size // 5, size // 2),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+                else:
+                    g = int(200 * fr_d)
+                    r = int(200 * (1 - fr_d))
+                    cv2.putText(adv_bgr, f"FR: {fr_d:.0%}", (8, size // 2),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, g, r), 2)
+                cv2.putText(adv_bgr, f"{dcfg['name']} ({dcfg['size']}px)", (5, size - 8),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+                panels.append(adv_bgr)
+
+            cv2.putText(ref_bgr, "Original", (5, size - 8),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+            if n_source == 0:
+                cv2.putText(ref_bgr, "Aucun humain", (5, size // 2),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.55, (150, 150, 150), 1)
+
+            legend_m = create_legend(size, np.unique(ref_preds_m), focus_classes=focus_classes)
+            frame = np.hstack(panels + [legend_m])
+
+            src_name = CLASS_NAMES[args.source_class]
+            cv2.putText(frame, f"{src_name}: {n_source} tokens | frame {len(fooling_history[0])}", (10, 22),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            cv2.putText(frame, img_path.name, (10, 42),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
+
         else:  # segment
             frame = np.hstack([img_display, ref_seg, adv_seg, seg_diff])
             labels = ["Image + Patch", "Seg Original", "Seg Attacked", "Changed"]
@@ -525,6 +727,53 @@ def main():
         print(f"\nVideo saved to {args.output}")
 
     cv2.destroyAllWindows()
+
+    # Summary plot for multi-distance mode
+    if args.mode == 'multi' and fooling_history and len(fooling_history[0]) > 0:
+        n_frames = len(fooling_history[0])
+        frames_x = np.arange(n_frames)
+        dist_colors_plot = ['#2196F3', '#FF9800', '#F44336']  # blue / orange / red
+
+        fig, (ax1, ax2) = plt.subplots(
+            2, 1, figsize=(14, 7), sharex=True,
+            gridspec_kw={'height_ratios': [3, 1]}
+        )
+
+        for di, dcfg in enumerate(dist_configs):
+            ax1.plot(frames_x, fooling_history[di], color=dist_colors_plot[di],
+                    linewidth=2, label=f"{dcfg['name']} ({dcfg['size']}px)")
+            if disappeared_frames[di]:
+                ax1.scatter(disappeared_frames[di],
+                           [fooling_history[di][f] for f in disappeared_frames[di]],
+                           color=dist_colors_plot[di], marker='v', s=100, zorder=5)
+        ax1.axhline(1.0, color='gray', linestyle='--', alpha=0.4, linewidth=1)
+        ax1.set_ylabel("Taux de tromperie")
+        ax1.set_ylim(-0.05, 1.15)
+        ax1.set_title(f"Erreur de perception — '{CLASS_NAMES[args.source_class]}' — 3 distances (▼ = disparition)")
+        ax1.legend(loc='upper right')
+        ax1.grid(True, alpha=0.3)
+
+        for di, dcfg in enumerate(dist_configs):
+            gone_set = set(disappeared_frames[di])
+            signal = np.array([1 if f in gone_set else 0 for f in range(n_frames)], dtype=float)
+            pct = 100 * len(disappeared_frames[di]) // max(1, n_frames)
+            ax2.fill_between(frames_x, signal, step='mid', alpha=0.65,
+                            color=dist_colors_plot[di],
+                            label=f"{dcfg['name']}: {len(disappeared_frames[di])} frames ({pct}%)")
+        ax2.set_ylabel("Disparu")
+        ax2.set_xlabel("Frame")
+        ax2.set_ylim(0, 1.5)
+        ax2.set_yticks([])
+        ax2.legend(loc='upper right', fontsize=9)
+        ax2.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        out_plot = Path('results/multi_distance_analysis.png')
+        out_plot.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(out_plot, dpi=150, bbox_inches='tight')
+        print(f"Summary plot saved to {out_plot}")
+        plt.show()
+
     print("Done!")
 
 
