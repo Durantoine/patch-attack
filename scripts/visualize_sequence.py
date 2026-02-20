@@ -22,13 +22,17 @@ from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 import argparse
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from tqdm import tqdm
 
 from models.dinov3_loader import load_dinov3
-from utils.viz import CLASS_NAMES, CITYSCAPES_COLORS, CLASS_NAMES_SHORT, OTHER_COLOR, create_legend
+from utils.viz import (CLASS_NAMES, CITYSCAPES_COLORS, CLASS_NAMES_SHORT, OTHER_COLOR,
+                       create_legend, compute_perspective_size)
 from utils.config import (
-    DATASET, PATCH_SIZE, PATCH_POS, VIZ_SEQ_SIZE, CLUSTERS, FPS, REFRESH,
-    CLASSIFIER, SOURCE_CLASS, TARGET_CLASS, FOCUS_CLASSES, PATCH_PERSPECTIVE_MIN_SCALE,
+    VIZ_DATASET, PATCH_SIZE, PATCH_POS, VIZ_SEQ_SIZE, CLUSTERS, FPS, REFRESH,
+    CLASSIFIER, SOURCE_CLASS, TARGET_CLASS, FOCUS_CLASSES,
+    PATCH_PERSPECTIVE_MIN_SCALE, PATCH_MIN_ROW_RATIO, PATCH_Y_RATIO,
 )
 
 
@@ -80,21 +84,22 @@ def resize_patch(patch: torch.Tensor, size: int) -> torch.Tensor:
     ).squeeze(0)
 
 
-def compute_perspective_size(x: int, img_size: int, max_size: int, min_scale: float) -> int:
-    """Effective patch size based on vertical position: smaller higher up (farther from camera)."""
-    t = min(1.0, (x + max_size / 2) / img_size)
-    scale = min_scale + (1.0 - min_scale) * t
-    return max(1, int(max_size * scale))
+def get_distance_configs(img_size: int, patch_size: int, min_scale: float,
+                         min_row_ratio: float = PATCH_MIN_ROW_RATIO,
+                         y_ratio: float = PATCH_Y_RATIO) -> list[dict]:
+    """Three roadside patch configs at far / medium / near distances.
 
-
-def get_distance_configs(img_size: int, patch_size: int, min_scale: float) -> list[dict]:
-    """Three roadside patch configs at far / medium / near distances."""
-    y_road = int(img_size * 0.55)  # right-centre of road
+    Positions are distributed within [min_row_ratio, ~0.80] so the patch
+    never appears in the sky or building tops.
+    """
     configs = []
-    for name, x_ratio in [("Loin", 0.15), ("Moyen", 0.45), ("Proche", 0.72)]:
+    far_ratio   = min_row_ratio
+    mid_ratio   = min_row_ratio + (0.78 - min_row_ratio) * 0.45
+    near_ratio  = min_row_ratio + (0.78 - min_row_ratio) * 0.90
+    for name, x_ratio in [("Loin", far_ratio), ("Moyen", mid_ratio), ("Proche", near_ratio)]:
         x = int(img_size * x_ratio)
         eff = compute_perspective_size(x, img_size, patch_size, min_scale)
-        y = min(y_road, img_size - eff - 1)
+        y = min(int((img_size - eff) * y_ratio), img_size - eff - 1)
         configs.append({"name": name, "x": x, "y": y, "size": eff})
     return configs
 
@@ -358,9 +363,70 @@ def create_classifier_diff(preds_ref, preds_adv, source_class, target_class, siz
     return diff, fr, n_source
 
 
+def create_pca_scatter(token_sets: list, pca_model, width: int, height: int,
+                       n_samples: int = 80, draw_lines: bool = True):
+    """3D PCA scatter of DINOv3 token embeddings.
+
+    token_sets: list of (label: str, tokens_np [N, D], color_hex: str)
+    draw_lines: connect first two point sets with thin lines (clean → attacked)
+    Returns: (bgr_img np.ndarray, pca_model)
+    """
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+    if pca_model is None:
+        all_np = np.vstack([t for _, t, _ in token_sets])
+        pca_model = PCA(n_components=3)
+        pca_model.fit(all_np)
+
+    projected = [(lbl, pca_model.transform(t), c) for lbl, t, c in token_sets]
+    n_total = len(projected[0][1])
+    n = min(n_samples, n_total)
+    idx = np.round(np.linspace(0, n_total - 1, n)).astype(int)
+
+    fig = Figure(figsize=(width / 100, height / 100), dpi=100)
+    fig.patch.set_facecolor('#0f0f1a')
+    canvas = FigureCanvasAgg(fig)
+    ax = fig.add_subplot(111, projection='3d')
+    ax.set_facecolor('#0f0f1a')
+    ax.xaxis.pane.fill = False
+    ax.yaxis.pane.fill = False
+    ax.zaxis.pane.fill = False
+    ax.xaxis.pane.set_edgecolor('#222233')
+    ax.yaxis.pane.set_edgecolor('#222233')
+    ax.zaxis.pane.set_edgecolor('#222233')
+    ax.grid(True, alpha=0.08)
+    ax.view_init(elev=20, azim=45)
+
+    if draw_lines and len(projected) >= 2:
+        pts0 = projected[0][1][idx]
+        pts1 = projected[1][1][idx]
+        for p0, p1 in zip(pts0, pts1):
+            ax.plot([p0[0], p1[0]], [p0[1], p1[1]], [p0[2], p1[2]],
+                    color='white', alpha=0.12, lw=0.5)
+
+    for lbl, pts, color in projected:
+        s = pts[idx]
+        ax.scatter(s[:, 0], s[:, 1], s[:, 2], c=color, s=18, alpha=0.85,
+                   label=lbl, depthshade=True, linewidths=0)
+
+    ax.set_xlabel('PC1', color='#888', fontsize=6, labelpad=2)
+    ax.set_ylabel('PC2', color='#888', fontsize=6, labelpad=2)
+    ax.set_zlabel('PC3', color='#888', fontsize=6, labelpad=2)
+    ax.tick_params(colors='#777', labelsize=4)
+    ax.legend(fontsize=7, facecolor='#1a1a2e', edgecolor='#444466',
+              labelcolor='white', loc='upper left', markerscale=1.5, framealpha=0.8)
+    ax.set_title('Embeddings DINOv3 — PCA 3D', color='#cccccc', fontsize=8, pad=6)
+
+    fig.tight_layout(pad=0.3)
+    canvas.draw()
+    buf = canvas.buffer_rgba()
+    img = np.asarray(buf)[:, :, :3].copy()
+    return cv2.cvtColor(img, cv2.COLOR_RGB2BGR), pca_model
+
+
 def main():
     parser = argparse.ArgumentParser(description='Visualize patch attack on image sequence')
-    parser.add_argument('--dataset', type=str, default=DATASET)
+    parser.add_argument('--dataset', type=str, default=VIZ_DATASET)
     parser.add_argument('--patch', type=str, required=True)
     parser.add_argument('--patch-size', type=int, default=PATCH_SIZE)
     parser.add_argument('--patch-pos', type=int, nargs=2, default=PATCH_POS)
@@ -369,6 +435,10 @@ def main():
     parser.add_argument('--mode', choices=['pca', 'segment', 'both', 'trajectory', 'all', 'classifier', 'multi'], default='all')
     parser.add_argument('--perspective-min-scale', type=float, default=PATCH_PERSPECTIVE_MIN_SCALE,
                         help='Min patch scale at top of image for multi mode')
+    parser.add_argument('--min-row-ratio', type=float, default=PATCH_MIN_ROW_RATIO,
+                        help='Min vertical position as fraction of height (below sky/buildings)')
+    parser.add_argument('--patch-y-ratio', type=float, default=PATCH_Y_RATIO,
+                        help='Horizontal patch center as fraction of image width (0=left, 1=right)')
     parser.add_argument('--clusters', type=int, default=CLUSTERS)
     parser.add_argument('--fps', type=int, default=FPS)
     parser.add_argument('--smooth', action='store_true')
@@ -418,12 +488,26 @@ def main():
     fooling_history = None
     disappeared_frames = None
     if args.mode == 'multi':
-        dist_configs = get_distance_configs(img_size, args.patch_size, args.perspective_min_scale)
+        dist_configs = get_distance_configs(img_size, args.patch_size, args.perspective_min_scale,
+                                            args.min_row_ratio, args.patch_y_ratio)
         fooling_history = [[] for _ in dist_configs]
         disappeared_frames = [[] for _ in dist_configs]
         print("Multi-distance configs:")
         for d in dist_configs:
             print(f"  {d['name']:8s}: row={d['x']}, col={d['y']}, size={d['size']}px")
+
+    # Classifier mode: use perspective-correct position (medium distance)
+    patch_active = patch
+    patch_pos_active = tuple(args.patch_pos)
+    patch_draw_size = args.patch_size
+    if args.mode == 'classifier':
+        clf_configs = get_distance_configs(img_size, args.patch_size, args.perspective_min_scale,
+                                           args.min_row_ratio, args.patch_y_ratio)
+        clf_pos_cfg = clf_configs[1]  # medium distance
+        patch_active = resize_patch(patch, clf_pos_cfg['size'])
+        patch_pos_active = (clf_pos_cfg['x'], clf_pos_cfg['y'])
+        patch_draw_size = clf_pos_cfg['size']
+        print(f"Classifier patch: row={clf_pos_cfg['x']}, col={clf_pos_cfg['y']}, size={clf_pos_cfg['size']}px")
     print(f"Image size: {img_size}x{img_size} -> {grid}x{grid} tokens")
 
     # Transform
@@ -452,7 +536,7 @@ def main():
         height = args.size * 2  # 2 rows
     elif args.mode in ('classifier', 'multi'):
         width = args.size * 4 + args.size // 2  # ref + 3 dist + legend
-        height = args.size
+        height = args.size * 2  # row1: segmentation  row2: embeddings
     elif args.mode in ('both', 'segment'):
         width = args.size * 4  # 4 panels
         height = args.size
@@ -471,6 +555,8 @@ def main():
     global_pca_vis = None
     global_pca_min = None
     global_pca_max = None
+    # PCA scatter model (shared for classifier/multi)
+    global_pca_scatter = None
     # Counter for model refresh
     frame_count = 0
 
@@ -485,7 +571,6 @@ def main():
 
     # Process images
     print("\nProcessing images...")
-    patch_pos = tuple(args.patch_pos)
 
     for img_path in tqdm(image_paths):
         # Load image
@@ -495,8 +580,8 @@ def main():
         # Get reference tokens (without patch)
         tokens_ref = get_patch_tokens(model, img_tensor)
 
-        # Apply patch and get adversarial tokens
-        patched_img = apply_patch(img_tensor, patch, patch_pos)
+        # Apply patch (perspective-correct size and position)
+        patched_img = apply_patch(img_tensor, patch_active, patch_pos_active)
         tokens_adv = get_patch_tokens(model, patched_img)
 
         # Calculate distances
@@ -512,10 +597,10 @@ def main():
         img_display = cv2.resize(img_np, (size, size))
         img_display = cv2.cvtColor(img_display, cv2.COLOR_RGB2BGR)
 
-        # Draw patch rectangle
+        # Draw patch rectangle (perspective-scaled size)
         scale = size / img_size
-        px, py = int(patch_pos[1] * scale), int(patch_pos[0] * scale)
-        ps = int(args.patch_size * scale)
+        px, py = int(patch_pos_active[1] * scale), int(patch_pos_active[0] * scale)
+        ps = int(patch_draw_size * scale)
         cv2.rectangle(img_display, (px, py), (px + ps, py + ps), (0, 255, 0), 2)
 
         # Refresh models periodically to adapt to scene changes
@@ -525,6 +610,7 @@ def main():
             global_pca_max = None
             global_kmeans = None
             global_pca = None
+            global_pca_scatter = None
         frame_count += 1
 
         if args.mode == 'pca' or args.mode == 'both' or args.mode == 'all':
@@ -565,6 +651,11 @@ def main():
             ref_clf_vis = cv2.cvtColor(ref_clf_vis, cv2.COLOR_RGB2BGR)
             adv_clf_vis = cv2.cvtColor(adv_clf_vis, cv2.COLOR_RGB2BGR)
             clf_diff = cv2.cvtColor(clf_diff, cv2.COLOR_RGB2BGR)
+            # Embedding row: 2D PCA scatter (clean blue vs attacked red + connecting lines)
+            pca_scatter_img, global_pca_scatter = create_pca_scatter(
+                [("Clean", tokens_ref.cpu().numpy(), '#4fc3f7'),
+                 ("Attaqué", tokens_adv.cpu().numpy(), '#ef5350')],
+                global_pca_scatter, 3 * size, size, n_samples=80, draw_lines=True)
 
         # Distance heatmap
         n_patches = grid * grid
@@ -637,15 +728,23 @@ def main():
         elif args.mode == 'classifier':
             src_n = CLASS_NAMES[args.source_class]
             tgt_n = "any" if args.target_class == -1 else CLASS_NAMES[args.target_class]
-            frame = np.hstack([img_display, ref_clf_vis, adv_clf_vis, clf_diff, clf_legend])
-            labels = ["Image+Patch", "Seg Original", "Seg Attacked", f"{src_n}→{tgt_n}"]
-            for i, label in enumerate(labels):
-                cv2.putText(frame, label, (i * size + 5, height - 8),
+            empty_leg = np.full((size, size // 2, 3), 30, dtype=np.uint8)
+            row1_c = np.hstack([img_display, ref_clf_vis, adv_clf_vis, clf_diff, clf_legend])
+            # row2: scatter (3×size) + dist heatmap (size) + legend stub (size//2)
+            row2_c = np.hstack([pca_scatter_img, dist_heatmap, empty_leg])
+            frame = np.vstack([row1_c, row2_c])
+            labels_r1 = ["Image+Patch", "Seg Original", "Seg Attacked", f"{src_n}→{tgt_n}"]
+            for i, label in enumerate(labels_r1):
+                cv2.putText(frame, label, (i * size + 5, size - 8),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-            cv2.putText(frame, f"Fooling: {fooling_rate:.1f}% ({n_source} tokens)", (10, 25),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            cv2.putText(frame, img_path.name, (10, 50),
+            cv2.putText(frame, "Embeddings DINOv3 — PCA 3D", (5, 2 * size - 8),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            cv2.putText(frame, "Perturbation L2", (3 * size + 5, 2 * size - 8),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            cv2.putText(frame, f"Fooling: {fooling_rate:.1f}% ({n_source} tokens) | MSE: {mse:.4f}", (10, 25),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            cv2.putText(frame, img_path.name, (10, 45),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
 
         elif args.mode == 'multi':
             ref_vis_m, ref_preds_m = create_classifier_vis(
@@ -655,6 +754,9 @@ def main():
             n_source = int((ref_preds_m == args.source_class).sum())
 
             panels = [ref_bgr]
+            dist_heatmaps_m = []
+            _multi_colors = ['#1E88E5', '#FF9800', '#E53935']  # Loin, Moyen, Proche
+            token_sets_m = [("Clean", tokens_ref.cpu().numpy(), '#4fc3f7')]
             for di, dcfg in enumerate(dist_configs):
                 patch_d = resize_patch(patch, dcfg["size"])
                 patched_d = apply_patch(img_tensor, patch_d, (dcfg["x"], dcfg["y"]))
@@ -684,6 +786,17 @@ def main():
                 cv2.putText(adv_bgr, f"{dcfg['name']} ({dcfg['size']}px)", (5, size - 8),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
                 panels.append(adv_bgr)
+                token_sets_m.append((dcfg['name'], tokens_d.cpu().numpy(), _multi_colors[di]))
+
+                # Distance heatmap for this distance config
+                dists_d = torch.norm(tokens_d - tokens_ref, dim=1).cpu().numpy()
+                n_p = grid * grid
+                if len(dists_d) < n_p:
+                    dists_d = np.concatenate([dists_d, np.zeros(n_p - len(dists_d))])
+                dm = dists_d[:n_p].reshape(grid, grid)
+                dm = cv2.resize(dm, (size, size), interpolation=interp)
+                dm = (dm / (dm.max() + 1e-8) * 255).astype(np.uint8)
+                dist_heatmaps_m.append(cv2.applyColorMap(dm, cv2.COLORMAP_HOT))
 
             cv2.putText(ref_bgr, "Original", (5, size - 8),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
@@ -692,7 +805,25 @@ def main():
                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (150, 150, 150), 1)
 
             legend_m = create_legend(size, np.unique(ref_preds_m), focus_classes=focus_classes)
-            frame = np.hstack(panels + [legend_m])
+
+            # Row 2: PCA scatter (4 clouds: clean + 3 distances) + 3 distance heatmaps
+            pca_scatter_m, global_pca_scatter = create_pca_scatter(
+                token_sets_m, global_pca_scatter, size, size, n_samples=40, draw_lines=False)
+            empty_leg_m = np.full((size, size // 2, 3), 30, dtype=np.uint8)
+            row1_m = np.hstack(panels + [legend_m])
+            row2_m = np.hstack([pca_scatter_m] + dist_heatmaps_m + [empty_leg_m])
+            frame = np.vstack([row1_m, row2_m])
+
+            # Labels row 1
+            cv2.putText(frame, "Original", (5, size - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            for i, dcfg in enumerate(dist_configs):
+                cv2.putText(frame, dcfg['name'], ((i + 1) * size + 5, size - 8),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            # Labels row 2
+            cv2.putText(frame, "PCA 3D", (5, 2 * size - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            for i, dcfg in enumerate(dist_configs):
+                cv2.putText(frame, f"Perturb. {dcfg['name']}", ((i + 1) * size + 5, 2 * size - 8),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
 
             src_name = CLASS_NAMES[args.source_class]
             cv2.putText(frame, f"{src_name}: {n_source} tokens | frame {len(fooling_history[0])}", (10, 22),

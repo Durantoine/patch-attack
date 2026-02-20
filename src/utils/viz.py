@@ -87,6 +87,13 @@ def create_legend(size: int, present_classes: np.ndarray | None = None,
     return legend
 
 
+def compute_perspective_size(x: int, img_size: int, max_size: int, min_scale: float) -> int:
+    """Effective patch size based on vertical position: smaller when higher (farther from camera)."""
+    t = min(1.0, (x + max_size / 2) / img_size)
+    scale = min_scale + (1.0 - min_scale) * t
+    return max(1, int(max_size * scale))
+
+
 def patch_to_img(patch: torch.Tensor, size: int) -> np.ndarray:
     """Patch tensor (3,H,W) -> BGR image."""
     img = np.clip(patch.detach().cpu().permute(1, 2, 0).numpy(), 0, 1)

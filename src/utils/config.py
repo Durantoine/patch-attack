@@ -6,7 +6,8 @@ Modify these values to change defaults without CLI arguments.
 # === Paths ===
 CITYSCAPES_IMAGES: str = "data/leftImg8bit_trainvaltest/leftImg8bit/train"
 CITYSCAPES_LABELS: str = "data/gtFine_trainvaltest-2/gtFine/train"
-DATASET: str = "data/leftImg8bit_trainvaltest/leftImg8bit/train"
+DATASET: str = "data/leftImg8bit_trainvaltest/leftImg8bit/train"   # training dataset (Cityscapes)
+VIZ_DATASET: str = "data/stuttgart_02"                             # sequence for visualization
 CLASSIFIER: str = "results/classifier.pt"
 OUTPUT_DIR: str = "results"
 
@@ -23,9 +24,13 @@ TARGET_CLASS: int = -1       # -1 = untargeted (any misclassification)
 ATTACK_STEPS: int = 3000
 ATTACK_LR: float = 0.05
 ATTACK_BATCH_SIZE: int = 4
-PATCH_SIZE: int = 112        # Size on image (pixels) — ~17% of IMG_SIZE
+ATTACK_MIN_SOURCE_TOKENS: int = 10  # Min source-class tokens per image to include in training
+PATCH_SIZE: int = 132        # Size on ismage (pixels) — ~17% of IMG_SIZE
 PATCH_RES: int = 256         # Internal patch resolution (optimized pixels)
-PATCH_PERSPECTIVE_MIN_SCALE: float = 0.2  # Min scale at top (far) vs bottom (near)
+PATCH_PERSPECTIVE_MIN_SCALE: float = 0.3  # Min scale at top (far) vs bottom (near)
+PATCH_MIN_ROW_RATIO: float = 0.3        # Min vertical position — near horizon, below sky (~35% from top)
+PATCH_Y_RATIO: float = 0.85             # Horizontal position as fraction of image width — 0.28=left sidewalk, 0.72=right sidewalk
+PATCH_SAVE_EVERY: int = 200             # Save patch snapshot every N steps for evolution replay (0=off)
 
 # === Visualization ===
 VIZ_SIZE: int = 500          # Panel size for training viz
