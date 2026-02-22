@@ -4,7 +4,7 @@ from invoke import task
 @task
 def clean(c):
     c.run("find . -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true", warn=True)
-    c.run("rm -rf .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage", warn=True)
+    c.run("rm -rf .pytest_cache .ruff_cache .mypy_cache htmlcov .coverage", warn=True)
 
 
 @task
@@ -24,13 +24,13 @@ def lint(c, fix=False):
 
 
 @task
-def test(c):
-    c.run("uv run pytest", pty=True)
+def typecheck(c):
+    c.run("uv run mypy src", pty=True)
 
 
 @task
-def typecheck(c):
-    c.run("uv run mypy src tests", pty=True)
+def test(c):
+    c.run("uv run pytest", pty=True)
 
 
 @task

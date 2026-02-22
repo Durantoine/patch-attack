@@ -1,307 +1,210 @@
 # Adversarial Patch Attacks on DINOv3
 
-Adversarial patch attacks targeting DINOv3 vision transformer for semantic segmentation disruption on Cityscapes driving sequences.
+Attaques par patch adversarial sur un classifieur sémantique construit au-dessus de DINOv3 (ViT-S/16). Le patch fait disparaître ou mal-classifier des piétons (ou toute autre classe) dans une séquence de conduite.
 
-**Compatible Mac M3 Max (MPS) / CUDA / CPU**
-
-## Overview
-
-This project trains adversarial patches that fool a semantic segmentation classifier built on top of DINOv3 (ViT-S/16). The attack makes pedestrians (or other classes) disappear from or be misclassified in the segmentation output.
-
-**Pipeline:**
-1. **Train a classifier** — linear probe on DINOv3 tokens, trained on Cityscapes labels
-2. **Train an adversarial patch** — optimized to fool the classifier on a target class
-3. **Visualize** — sequence visualization showing segmentation before/after attack
+**Compatible Mac M3 (MPS) / CUDA / CPU**
 
 ---
 
-## Quick Start
+## Pipeline
 
-```bash
-# Install dependencies
-uv sync
-
-# Place DINOv3 weights at:
-# src/models/weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth
-
-# 1. Train the classifier
-python scripts/train_classifier.py
-
-# 2. Train the adversarial patch
-python scripts/attack_classifier.py
-
-# 3. Visualize on a sequence
-python scripts/visualize_sequence.py --patch results/targeted_patch_final.pt --mode classifier
+```
+1. train_classifier.py   → entraîne une sonde linéaire sur les tokens DINOv3 (Cityscapes)
+2. generate_patch.py  → optimise un patch adversarial contre le classifieur
+3. visualize_sequence.py → visualise l'attaque sur une séquence + export vidéo
 ```
 
-All default parameters are configured in `src/utils/config.py` — no CLI arguments required.
+---
+
+## Démarrage rapide
+
+```bash
+# Installer le projet (crée les commandes train-classifier, generate-patch, visualize-sequence)
+uv sync
+
+# Placer les poids DINOv3 :
+# src/patch_attack/models/weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth
+
+# 1. Entraîner le classifieur
+python -m patch_attack.train_classifier
+
+# 2. Générer le patch adversarial
+python -m patch_attack.generate_patch
+
+# 3. Visualiser sur une séquence
+python -m patch_attack.visualize_sequence
+```
+
+Ou après `uv sync` : `train-classifier` · `generate-patch` · `visualize-sequence`
+
+Tous les paramètres sont dans [`src/patch_attack/utils/config.py`](src/patch_attack/utils/config.py) — **aucun argument CLI**.
+
+**Développement :**
+```bash
+uv sync --all-extras
+inv check      # format + lint + typecheck + test
+inv typecheck  # mypy uniquement
+inv lint       # ruff uniquement
+```
 
 ---
 
-## Project Structure
+## Structure
 
 ```
 .
-├── data/                           # Images & datasets
-│   ├── stuttgart_00/               # Driving sequence (599 frames)
-│   ├── leftImg8bit_trainvaltest/   # Cityscapes images
-│   └── gtFine_trainvaltest-2/      # Cityscapes labels
-├── results/                        # Output: patches, visualizations
-├── scripts/
-│   ├── train_classifier.py         # Train linear probe on Cityscapes tokens
-│   ├── attack_classifier.py        # Train adversarial patch against classifier
-│   ├── visualize_sequence.py       # Visualize attack effect on image sequence
-│   └── train_dataset.py            # Universal embedding attack on dataset
-├── src/
-│   ├── models/
-│   │   ├── dinov3/                 # DINOv3 model code
-│   │   ├── dinov3_loader.py        # Model loader
-│   │   └── weights/                # Model weights (not tracked by git)
-│   ├── attacks/
-│   │   └── eot_attack.py           # EOT (Expectation Over Transformation)
-│   └── utils/
-│       ├── config.py               # Centralized default parameters
-│       └── viz.py                  # Shared visualization utilities
+├── data/
+│   ├── stuttgart/                  # Séquences de conduite
+│   │   ├── stuttgart_00/
+│   │   ├── stuttgart_01/
+│   │   └── stuttgart_02/           # Séquence par défaut (VIZ_DATASET)
+│   ├── leftImg8bit_trainvaltest/   # Images Cityscapes
+│   └── gtFine_trainvaltest/        # Labels Cityscapes
+├── results/
+│   ├── classifier.pt               # Classifieur entraîné
+│   ├── targeted_patch_best.pt      # Meilleur patch (fooling rate max)
+│   ├── targeted_patch_final.pt     # Patch final
+│   ├── targeted_attack_results.png # Courbe fooling rate + patch
+│   ├── patch_evolution/            # Snapshots du patch pendant l'entraînement
+│   ├── patch_evolution.mp4         # Vidéo évolution du patch
+│   └── demo/
+│       ├── stuttgart_02.mp4        # Vidéo de l'attaque sur la séquence
+│       └── stuttgart_02_analysis.png  # Graphe fooling rate 3 distances
+└── src/
+    └── patch_attack/
+        ├── train_classifier.py
+        ├── generate_patch.py
+        ├── visualize_sequence.py
+        ├── utils/
+        │   ├── config.py           # Tous les paramètres
+        │   └── viz.py              # Utilitaires de visualisation
+        └── models/
+            ├── dinov3/             # Code DINOv3
+            ├── dinov3_loader.py
+            └── weights/            # Poids (non tracés par git)
 ```
 
 ---
 
 ## Configuration
 
-All default parameters live in `src/utils/config.py`. Edit this file to change defaults without passing CLI arguments.
+Tout se passe dans [`src/patch_attack/utils/config.py`](src/patch_attack/utils/config.py) :
 
 ```python
-# Model
-IMG_SIZE = 672          # Input resolution: 224=14×14, 448=28×28, 672=42×42 tokens
+CITYSCAPES_IMAGES = "data/leftImg8bit_trainvaltest/leftImg8bit/train"
+CITYSCAPES_LABELS = "data/gtFine_trainvaltest/gtFine/train"
+DATASET           = "data/leftImg8bit_trainvaltest/leftImg8bit/train"
+VIZ_DATASET       = "data/stuttgart/stuttgart_02"  # ou stuttgart_00, stuttgart_01
+CLASSIFIER        = "results/classifier.pt"
+PATCH             = "results/targeted_patch_best.pt"
+OUTPUT_DIR        = "results"
 
-# Classifier training
+IMG_SIZE = 672      # 224=14×14 | 448=28×28 | 672=42×42 tokens
+
 CLF_EPOCHS = 20
-CLF_LR = 0.001
+CLF_LR     = 0.001
 
-# Attack
-SOURCE_CLASS = 11       # person
-TARGET_CLASS = -1       # -1 = untargeted
-ATTACK_STEPS = 2000
-ATTACK_LR = 0.05
-PATCH_SIZE = 112        # Patch size on image (~17% of IMG_SIZE)
-PATCH_RES = 256         # Internal optimization resolution
-PATCH_PERSPECTIVE_MIN_SCALE = 0.3  # Perspective scaling (0.3 = 3× smaller at top)
-
-# Visualization
-VIZ_SIZE = 500          # Panel size during attack training
-VIZ_EVERY = 10          # Live viz every N steps
-VIZ_SEQ_SIZE = 300      # Panel size for sequence visualization
+SOURCE_CLASS             = 11    # person (0=road, 13=car, …)
+TARGET_CLASS             = -1    # -1 = non ciblé, sinon ID de classe cible
+ATTACK_STEPS             = 3000
+ATTACK_LR                = 0.05
+ATTACK_BATCH_SIZE        = 4
+ATTACK_MIN_SOURCE_TOKENS = 10    # images filtrées si < N tokens source
+PATCH_SIZE               = 132   # taille sur l'image (~17 % de IMG_SIZE)
+PATCH_RES                = 256   # résolution interne d'optimisation
+PATCH_PERSPECTIVE_MIN_SCALE = 0.3  # 3× plus petit en haut (loin) qu'en bas (près)
 ```
 
 ---
 
-## Step 1 — Train Linear Probe
+## Étape 1 — Classifieur linéaire
 
-Trains a `nn.Linear(384, 19)` classifier on DINOv3 token embeddings using Cityscapes ground truth labels.
+Entraîne `nn.Linear(384, 19)` sur les embeddings de tokens DINOv3 avec les labels Cityscapes.
 
-**Required data** (download from [cityscapes-dataset.com](https://www.cityscapes-dataset.com/downloads/)):
+**Données requises** ([cityscapes-dataset.com](https://www.cityscapes-dataset.com/downloads/)) :
 - `leftImg8bit_trainvaltest.zip` → `data/leftImg8bit_trainvaltest/leftImg8bit/train/`
-- `gtFine_trainvaltest.zip` → `data/gtFine_trainvaltest-2/gtFine/train/`
+- `gtFine_trainvaltest.zip` → `data/gtFine_trainvaltest/gtFine/train/`
 
-```bash
-# With all defaults from config.py
-python scripts/train_classifier.py
+Une fenêtre live montre GT vs prédictions sur 4 images représentatives à chaque époque.
 
-# Override specific params
-python scripts/train_classifier.py --img-size 448 --epochs 30
-```
-
-A live window shows ground truth vs. predicted segmentation on 4 representative images at each epoch.
-
-| Param | Default | Description |
-|-------|---------|-------------|
-| `--images` | `data/leftImg8bit.../train` | Cityscapes image folder |
-| `--labels` | `data/gtFine.../train` | Cityscapes label folder |
-| `--img-size` | 672 | Input resolution |
-| `--epochs` | 20 | Training epochs |
-| `--lr` | 0.001 | Learning rate |
-| `--output` | `results` | Output directory |
-
-**Resolution vs. segmentation quality:**
-
-| `--img-size` | Grid | Tokens | Notes |
-|-------------|------|--------|-------|
-| 224 | 14×14 | 196 | Fast, coarse |
-| 448 | 28×28 | 784 | 4× finer |
-| **672** | **42×42** | **1764** | **Default — fine segmentation** |
-
-Output: `results/classifier.pt` (includes `img_size` metadata).
+**Sortie :** `results/classifier.pt`
 
 ---
 
-## Step 2 — Train Adversarial Patch
+## Étape 2 — Patch adversarial
 
-Optimizes a patch that causes tokens of the source class to be misclassified. The patch is optimized at high internal resolution (`PATCH_RES`) and bilinearly downsampled to `PATCH_SIZE` before being applied.
+Optimise un patch pour que les tokens de la classe source soient mal classifiés.
 
-**Perspective scaling**: patch size varies with vertical position, simulating a driving camera — smaller at the top (far), larger at the bottom (close).
+**Scaling perspective** : la taille du patch varie avec la position verticale — plus petit en haut (loin), plus grand en bas (près). La formule `compute_perspective_size(x)` assure une mise à l'échelle cohérente avec une caméra de conduite.
 
-```bash
-# With all defaults (untargeted: person → anything)
-python scripts/attack_classifier.py
+**Filtrage** : seules les images avec ≥ `ATTACK_MIN_SOURCE_TOKENS` tokens de la classe source sont utilisées, aussi bien au chargement qu'à chaque step.
 
-# Targeted: person → road
-python scripts/attack_classifier.py --source-class 11 --target-class 0
+**Contrainte de placement** : le patch est placé en dehors de la région de la classe source (20 essais max), pour éviter une attaque triviale par occultation.
 
-# Disable perspective scaling
-python scripts/attack_classifier.py --perspective-min-scale 1.0
+**Visualisation live :**
 ```
-
-A live window updates every `--viz-every` steps:
-
+[ Image+Patch | Seg Original | Seg Attaqué | Patch | Légende ]
 ```
-[ Image+Patch | Seg Original | Seg Attacked | Patch | Legend ]
-```
+Appuyer sur `q` pour arrêter prématurément.
 
-Only focus classes are colored (road, person, car); all others appear gray. Press `q` to stop early.
-
-| Param | Default | Description |
-|-------|---------|-------------|
-| `--source-class` | 11 (person) | Class to fool |
-| `--target-class` | -1 | Target class (-1 = any misclassification) |
-| `--steps` | 2000 | Optimization steps |
-| `--patch-size` | 112 | Patch size on image (pixels) |
-| `--patch-res` | 256 | Internal patch resolution (optimized size) |
-| `--perspective-min-scale` | 0.3 | Min scale factor at top of image (1.0 = disabled) |
-| `--lr` | 0.05 | Learning rate |
-| `--batch-size` | 4 | Images per step |
-| `--viz-every` | 10 | Live visualization interval (0 = off) |
-| `--viz-size` | 500 | Visualization panel size (px) |
-| `--output` | `results` | Output directory |
-
-The `img_size` is read automatically from the classifier checkpoint.
-
-Outputs: `results/targeted_patch_best.pt`, `results/targeted_patch_final.pt`, `results/targeted_attack_results.png`.
-
-**Cityscapes classes:** road(0), sidewalk(1), building(2), wall(3), fence(4), pole(5), traffic_light(6), traffic_sign(7), vegetation(8), terrain(9), sky(10), **person(11)**, rider(12), car(13), truck(14), bus(15), train(16), motorcycle(17), bicycle(18)
+**Sorties :**
+- `results/targeted_patch_best.pt` — meilleur patch (fooling rate max)
+- `results/targeted_patch_final.pt` — patch final
+- `results/targeted_attack_results.png` — courbe + patch
+- `results/patch_evolution.mp4` — vidéo d'évolution
+- `results/patch_evolution_grid.png` — grille de snapshots
 
 ---
 
-## Step 3 — Visualize on Sequence
+## Étape 3 — Visualisation séquence
 
-Applies the trained patch to every frame of a driving sequence and visualizes the segmentation effect.
+Applique le patch sur chaque frame et affiche l'effet en mode **multi-distance** (loin / moyen / proche) avec scaling perspective correct à chaque distance.
 
-```bash
-# Classifier mode (recommended)
-python scripts/visualize_sequence.py \
-    --patch results/targeted_patch_final.pt \
-    --mode classifier \
-    --fps 15
-
-# Save as video
-python scripts/visualize_sequence.py \
-    --patch results/targeted_patch_final.pt \
-    --mode classifier \
-    --output results/attack_video.mp4
+**Layout :**
+```
+Row 1 : [ Seg Original | Loin | Moyen | Proche | Légende ]
+Row 2 : [ PCA 3D scatter | Heatmap L2 Loin | Moyen | Proche ]
 ```
 
-**Classifier mode layout:**
+**Indicateurs par distance :**
+- `FR: XX%` — fooling rate (% de tokens source mal classifiés)
+- Cadre rouge + `DISPARU!` — tous les tokens source ont disparu
 
-```
-[ Image+Patch | Seg Original | Seg Attacked | Diff | Legend ]
-```
+**Contrôles :** `q` quitter · `Espace` pause
 
-Diff: green = source class unchanged, red = successfully fooled.
-
-**All modes:**
-
-| Mode | Layout | Description |
-|------|--------|-------------|
-| `classifier` | 1×4 + legend | Semantic segmentation with fooling diff |
-| `all` | 2×4 grid | PCA + K-means + trajectory + distance heatmap |
-| `pca` | 1×3 | PCA token visualization |
-| `segment` | 1×4 | K-means segmentation |
-| `trajectory` | 1×2 | Token displacement in PCA space |
-| `both` | 1×4 | PCA + distance heatmap |
-
-| Param | Default | Description |
-|-------|---------|-------------|
-| `--patch` | required | Path to patch file (.pt) |
-| `--dataset` | `data/stuttgart_00` | Image folder |
-| `--classifier` | `results/classifier.pt` | Classifier checkpoint |
-| `--patch-size` | 112 | Patch size (auto-resizes if saved at different size) |
-| `--patch-pos` | `50 50` | Patch position (row, col) |
-| `--mode` | `all` | Visualization mode |
-| `--size` | 300 | Panel size (px) |
-| `--fps` | 10 | Display / output video FPS |
-| `--source-class` | 11 | Class being attacked |
-| `--target-class` | -1 | Target class |
-| `--focus-classes` | `0 11 13` | Classes to color (road, person, car) |
-| `--smooth` | off | Smooth interpolation |
-| `--refresh` | 50 | Refresh PCA/K-means every N frames |
-| `--output` | None | Save to MP4 |
-
-**Controls:** `q` quit · `Space` pause/resume
+**Sorties :**
+- `results/demo/<dataset>.mp4` — vidéo de l'attaque
+- `results/demo/<dataset>_analysis.png` — graphe fooling rate + frames de disparition
 
 ---
 
-## How It Works
-
-### DINOv3 Token Extraction
+## Fonctionnement
 
 ```
 Image (672×672)
-     ↓
-Split into 42×42 patches (16×16 pixels each)
-     ↓
-DINOv3 Vision Transformer (ViT-S/16, 384-dim)
-     ↓
-1764 patch tokens  +  1 CLS token
-     ↓
-Linear probe: 384 → 19 classes (per token)
-     ↓
-Segmentation map (42×42 = 1764 "pixels")
-```
+     ↓ DINOv3 ViT-S/16
+1764 tokens (384 dim) + 1 CLS
+     ↓ nn.Linear(384 → 19)
+Carte de segmentation (42×42)
 
-### Attack Objective
-
-```
-For each step:
-  1. Sample a batch of images containing source_class
-  2. Place patch with perspective-scaled size (smaller = higher = farther)
-  3. Extract tokens from patched image
-  4. Loss = -CE(adv_logits[source_mask], source_class)   # untargeted
-          OR CE(adv_logits[source_mask], target_class)   # targeted
-  5. Backprop through classifier + DINOv3 → update patch
-  6. Clamp patch ∈ [0, 1]
-```
-
-The patch is optimized at `PATCH_RES` resolution and bilinearly downsampled to `PATCH_SIZE` at inference — decoupling optimization quality from physical patch size.
-
----
-
-## Dataset Structure
-
-```
-data/
-├── stuttgart_00/                    # Driving sequence for visualization
-│   ├── stuttgart_00_000000_000001_leftImg8bit.png
-│   └── ... (599 frames)
-├── leftImg8bit_trainvaltest/
-│   └── leftImg8bit/train/
-│       ├── aachen/
-│       ├── stuttgart/
-│       └── ... (18 cities)
-└── gtFine_trainvaltest-2/
-    └── gtFine/train/
-        ├── aachen/
-        │   └── *_gtFine_labelIds.png
-        └── ...
+Boucle d'optimisation :
+  1. Échantillonner un batch d'images contenant la classe source
+  2. Placer le patch (taille perspective-correcte, hors zone source)
+  3. Extraire les tokens → logits classifieur
+  4. Loss = -CE(logits[source], source_class)   # non ciblé
+          ou CE(logits[source], target_class)   # ciblé
+  5. Rétropropager → mettre à jour le patch
+  6. Contraindre patch ∈ [0, 1]
 ```
 
 ---
 
-## Development
+## Classes Cityscapes
 
-```bash
-# Run tests
-pytest
-
-# Format code
-black src/ scripts/
-ruff check src/ scripts/
-```
+| ID | Classe | ID | Classe |
+|----|--------|----|--------|
+| 0 | road | 10 | sky |
+| 1 | sidewalk | **11** | **person** |
+| 2 | building | 12 | rider |
+| 8 | vegetation | 13 | car |
+| 9 | terrain | 18 | bicycle |
