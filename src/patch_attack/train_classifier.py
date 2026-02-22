@@ -23,8 +23,25 @@ from .utils.config import (
 from .utils.viz import CLASS_NAMES, colorize_preds, create_legend
 
 LABEL_MAP = {
-    7: 0, 8: 1, 11: 2, 12: 3, 13: 4, 17: 5, 19: 6, 20: 7, 21: 8, 22: 9,
-    23: 10, 24: 11, 25: 12, 26: 13, 27: 14, 28: 15, 31: 16, 32: 17, 33: 18,
+    7: 0,
+    8: 1,
+    11: 2,
+    12: 3,
+    13: 4,
+    17: 5,
+    19: 6,
+    20: 7,
+    21: 8,
+    22: 9,
+    23: 10,
+    24: 11,
+    25: 12,
+    26: 13,
+    27: 14,
+    28: 15,
+    31: 16,
+    32: 17,
+    33: 18,
 }
 IGNORE = 255
 
@@ -69,15 +86,19 @@ class ClassifierTrainer:
         self.model = load_dinov3(self.device)
         self.clf = nn.Linear(384, 19).to(self.device)
         self.opt = torch.optim.Adam(self.clf.parameters(), lr=CLF_LR)
-        self.img_tf = transforms.Compose([
-            transforms.Resize(IMG_SIZE + 32),
-            transforms.CenterCrop(IMG_SIZE),
-            transforms.ToTensor(),
-        ])
-        self.lbl_tf = transforms.Compose([
-            transforms.Resize(IMG_SIZE, interpolation=transforms.InterpolationMode.NEAREST),
-            transforms.CenterCrop(IMG_SIZE),
-        ])
+        self.img_tf = transforms.Compose(
+            [
+                transforms.Resize(IMG_SIZE + 32),
+                transforms.CenterCrop(IMG_SIZE),
+                transforms.ToTensor(),
+            ]
+        )
+        self.lbl_tf = transforms.Compose(
+            [
+                transforms.Resize(IMG_SIZE, interpolation=transforms.InterpolationMode.NEAREST),
+                transforms.CenterCrop(IMG_SIZE),
+            ]
+        )
 
     def load_data(self) -> tuple:
         pairs = find_pairs(CITYSCAPES_IMAGES, CITYSCAPES_LABELS)
@@ -93,9 +114,7 @@ class ClassifierTrainer:
             img = self.img_tf(Image.open(img_path).convert("RGB")).unsqueeze(0).to(self.device)
             lbl = labels_to_tokens(self.lbl_tf(Image.open(lbl_path)), self.grid)
             with torch.no_grad():
-                tokens = F.normalize(
-                    self.model.get_intermediate_layers(img, n=1)[0][0, 1:], dim=-1
-                )
+                tokens = F.normalize(self.model.get_intermediate_layers(img, n=1)[0][0, 1:], dim=-1)
             all_tokens.append(tokens.cpu())
             all_labels.append(torch.from_numpy(lbl[: tokens.shape[0]]))
             if i in viz_idx:
@@ -128,9 +147,7 @@ class ClassifierTrainer:
         print(f"Époque {epoch + 1}/{CLF_EPOCHS} | Loss: {avg_loss:.4f} | Acc: {acc:.3f}")
         return avg_loss, acc
 
-    def render_frame(
-        self, epoch: int, avg_loss: float, acc: float, viz_samples: list
-    ) -> bool:
+    def render_frame(self, epoch: int, avg_loss: float, acc: float, viz_samples: list) -> bool:
         sz = VIZ_SIZE
         rows = []
         for img_t, tok, lbl in viz_samples:

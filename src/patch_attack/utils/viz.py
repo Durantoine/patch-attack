@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
@@ -161,24 +163,20 @@ def patch_to_img(patch: torch.Tensor, size: int) -> np.ndarray:
 
 
 def make_evolution_video(
-    evo_dir: "Path",  # type: ignore[name-defined]
+    evo_dir: Path,
     evo_steps: list,
     history: list,
     total_steps: int,
-    out_dir: "Path",  # type: ignore[name-defined]
+    out_dir: Path,
     src: str,
     tgt: str,
 ) -> None:
-    from pathlib import Path
-
     sz = 256
     video_path = out_dir / "patch_evolution.mp4"
     fps_evo = max(2, min(15, len(evo_steps) // 5 + 1))
-    writer = cv2.VideoWriter(
-        str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), fps_evo, (sz + 400, sz)
-    )
-    if not writer.isOpened():
-        writer = None
+    fourcc: int = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
+    _w = cv2.VideoWriter(str(video_path), fourcc, fps_evo, (sz + 400, sz))
+    writer: cv2.VideoWriter | None = _w if _w.isOpened() else None
     for s in evo_steps:
         pt = evo_dir / f"patch_step_{s:05d}.pt"
         if not pt.exists():
@@ -187,19 +185,34 @@ def make_evolution_video(
         fr = history[min(s - 1, len(history) - 1)] if history else 0.0
         panel = np.full((sz, 400, 3), 25, dtype=np.uint8)
         cv2.putText(
-            panel, f"Step {s}/{total_steps}", (10, 40),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (220, 220, 220), 2,
+            panel,
+            f"Step {s}/{total_steps}",
+            (10, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (220, 220, 220),
+            2,
         )
         cv2.putText(
-            panel, f"Attack: {src} -> {tgt}", (10, 80),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 1,
+            panel,
+            f"Attack: {src} -> {tgt}",
+            (10, 80),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (180, 180, 180),
+            1,
         )
         cv2.rectangle(panel, (10, 110), (370, 150), (60, 60, 60), -1)
         if fr > 0:
             cv2.rectangle(panel, (10, 110), (10 + int(360 * fr), 150), (0, 200, 80), -1)
         cv2.putText(
-            panel, f"Fooling: {fr:.0%}", (10, 180),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 220, 100), 2,
+            panel,
+            f"Fooling: {fr:.0%}",
+            (10, 180),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 220, 100),
+            2,
         )
         frame = np.hstack([patch_img, panel])
         if writer:

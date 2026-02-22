@@ -49,9 +49,10 @@ def apply_patch(image: torch.Tensor, patch: torch.Tensor, pos: tuple) -> torch.T
 
 
 def resize_patch(patch: torch.Tensor, size: int) -> torch.Tensor:
-    return F.interpolate(
+    result: torch.Tensor = F.interpolate(
         patch.unsqueeze(0), (size, size), mode="bilinear", align_corners=False
     ).squeeze(0)
+    return result
 
 
 def pca_scatter(
@@ -77,16 +78,28 @@ def pca_scatter(
     for lbl, pts, color in projected:
         s = pts[idx]
         ax.scatter(
-            s[:, 0], s[:, 1], s[:, 2],
-            c=color, s=18, alpha=0.85, label=lbl, depthshade=True, linewidths=0,
+            s[:, 0],
+            s[:, 1],
+            s[:, 2],
+            c=color,
+            s=18,
+            alpha=0.85,
+            label=lbl,
+            depthshade=True,
+            linewidths=0,
         )
     ax.set_xlabel("PC1", color="#888", fontsize=6, labelpad=2)
     ax.set_ylabel("PC2", color="#888", fontsize=6, labelpad=2)
     ax.set_zlabel("PC3", color="#888", fontsize=6, labelpad=2)
     ax.tick_params(colors="#777", labelsize=4)
     ax.legend(
-        fontsize=7, facecolor="#1a1a2e", edgecolor="#444466", labelcolor="white",
-        loc="upper left", markerscale=1.5, framealpha=0.8,
+        fontsize=7,
+        facecolor="#1a1a2e",
+        edgecolor="#444466",
+        labelcolor="white",
+        loc="upper left",
+        markerscale=1.5,
+        framealpha=0.8,
     )
     ax.set_title("Embeddings DINOv3 — PCA 3D", color="#cccccc", fontsize=8, pad=6)
     fig.tight_layout(pad=0.3)
@@ -114,11 +127,13 @@ class SequenceVisualizer:
             f"→ {self.grid}×{self.grid} tokens | {self.device}"
         )
         self.cfgs = self._dist_configs()
-        self.transform = transforms.Compose([
-            transforms.Resize(self.img_size + 32),
-            transforms.CenterCrop(self.img_size),
-            transforms.ToTensor(),
-        ])
+        self.transform = transforms.Compose(
+            [
+                transforms.Resize(self.img_size + 32),
+                transforms.CenterCrop(self.img_size),
+                transforms.ToTensor(),
+            ]
+        )
         self.src_name = CLASS_NAMES[SOURCE_CLASS]
         print("Configurations distance :")
         for c in self.cfgs:
@@ -132,7 +147,9 @@ class SequenceVisualizer:
             ("Proche", PATCH_MIN_ROW_RATIO + (0.78 - PATCH_MIN_ROW_RATIO) * 0.90),
         ]:
             x = int(self.img_size * ratio)
-            eff = compute_perspective_size(x, self.img_size, PATCH_SIZE, PATCH_PERSPECTIVE_MIN_SCALE)
+            eff = compute_perspective_size(
+                x, self.img_size, PATCH_SIZE, PATCH_PERSPECTIVE_MIN_SCALE
+            )
             y = min(int((self.img_size - eff) * PATCH_Y_RATIO), self.img_size - eff - 1)
             configs.append({"name": name, "x": x, "y": y, "size": eff})
         return configs
@@ -165,8 +182,13 @@ class SequenceVisualizer:
         )
         if n_src == 0:
             cv2.putText(
-                ref_bgr, f"Aucun {self.src_name}", (5, size // 2),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1,
+                ref_bgr,
+                f"Aucun {self.src_name}",
+                (5, size // 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (150, 150, 150),
+                1,
             )
         panels = [ref_bgr]
         heatmaps = []
@@ -187,18 +209,33 @@ class SequenceVisualizer:
             if gone:
                 cv2.rectangle(adv_bgr, (0, 0), (size - 1, size - 1), (0, 0, 255), 4)
                 cv2.putText(
-                    adv_bgr, "DISPARU!", (size // 5, size // 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2,
+                    adv_bgr,
+                    "DISPARU!",
+                    (size // 5, size // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 0, 255),
+                    2,
                 )
             else:
                 g, r = int(200 * fr), int(200 * (1 - fr))
                 cv2.putText(
-                    adv_bgr, f"FR: {fr:.0%}", (8, size // 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, g, r), 2,
+                    adv_bgr,
+                    f"FR: {fr:.0%}",
+                    (8, size // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, g, r),
+                    2,
                 )
             cv2.putText(
-                adv_bgr, f"{cfg['name']} ({cfg['size']}px)", (5, size - 8),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1,
+                adv_bgr,
+                f"{cfg['name']} ({cfg['size']}px)",
+                (5, size - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (200, 200, 200),
+                1,
             )
             panels.append(adv_bgr)
             token_sets.append((cfg["name"], tokens_d.cpu().numpy(), _colors[di]))
@@ -232,16 +269,26 @@ class SequenceVisualizer:
         )
         for i, cfg in enumerate(self.cfgs):
             cv2.putText(
-                frame, cfg["name"], ((i + 1) * size + 5, size - 8),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1,
+                frame,
+                cfg["name"],
+                ((i + 1) * size + 5, size - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (200, 200, 200),
+                1,
             )
         cv2.putText(
             frame, "PCA 3D", (5, 2 * size - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1
         )
         for i, cfg in enumerate(self.cfgs):
             cv2.putText(
-                frame, f"Perturb. {cfg['name']}", ((i + 1) * size + 5, 2 * size - 8),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1,
+                frame,
+                f"Perturb. {cfg['name']}",
+                ((i + 1) * size + 5, 2 * size - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (200, 200, 200),
+                1,
             )
         cv2.putText(
             frame,
@@ -268,21 +315,25 @@ class SequenceVisualizer:
         )
         for di, cfg in enumerate(self.cfgs):
             ax1.plot(
-                x, fooling_history[di], color=plot_colors[di], lw=2,
+                x,
+                fooling_history[di],
+                color=plot_colors[di],
+                lw=2,
                 label=f"{cfg['name']} ({cfg['size']}px)",
             )
             if disappeared_frames[di]:
                 ax1.scatter(
                     disappeared_frames[di],
                     [fooling_history[di][f] for f in disappeared_frames[di]],
-                    color=plot_colors[di], marker="v", s=100, zorder=5,
+                    color=plot_colors[di],
+                    marker="v",
+                    s=100,
+                    zorder=5,
                 )
         ax1.axhline(1.0, color="gray", ls="--", alpha=0.4, lw=1)
         ax1.set_ylabel("Taux de tromperie")
         ax1.set_ylim(-0.05, 1.15)
-        ax1.set_title(
-            f"Erreur de perception — '{self.src_name}' — 3 distances (▼ = disparition)"
-        )
+        ax1.set_title(f"Erreur de perception — '{self.src_name}' — 3 distances (▼ = disparition)")
         ax1.legend(loc="upper right")
         ax1.grid(True, alpha=0.3)
         for di, cfg in enumerate(self.cfgs):
@@ -290,7 +341,11 @@ class SequenceVisualizer:
             signal = np.array([1 if f in gone_set else 0 for f in range(n_frames)], dtype=float)
             pct = 100 * len(disappeared_frames[di]) // max(1, n_frames)
             ax2.fill_between(
-                x, signal, step="mid", alpha=0.65, color=plot_colors[di],
+                x,
+                signal,
+                step="mid",
+                alpha=0.65,
+                color=plot_colors[di],
                 label=f"{cfg['name']}: {len(disappeared_frames[di])} frames ({pct}%)",
             )
         ax2.set_ylabel("Disparu")
@@ -307,8 +362,7 @@ class SequenceVisualizer:
 
     def run(self) -> None:
         image_paths = sorted(
-            p for ext in ("*.jpg", "*.jpeg", "*.png", "*.webp")
-            for p in Path(VIZ_DATASET).glob(ext)
+            p for ext in ("*.jpg", "*.jpeg", "*.png", "*.webp") for p in Path(VIZ_DATASET).glob(ext)
         )
         print(f"{len(image_paths)} images dans {VIZ_DATASET}")
         if not image_paths:
@@ -318,10 +372,11 @@ class SequenceVisualizer:
         height = size * 2
         DEMO_DIR.mkdir(parents=True, exist_ok=True)
         out_path = DEMO_DIR / (Path(VIZ_DATASET).name + ".mp4")
-        writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), FPS, (width, height))
+        fourcc: int = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
+        writer = cv2.VideoWriter(str(out_path), fourcc, FPS, (width, height))
         print(f"Vidéo → {out_path}")
-        fooling_history = [[] for _ in self.cfgs]
-        disappeared_frames = [[] for _ in self.cfgs]
+        fooling_history: list[list[float]] = [[] for _ in self.cfgs]
+        disappeared_frames: list[list[int]] = [[] for _ in self.cfgs]
         global_pca: PCA | None = None
         cv2.namedWindow("Patch Attack Visualization", cv2.WINDOW_NORMAL)
 
