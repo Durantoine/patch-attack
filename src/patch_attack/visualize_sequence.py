@@ -1,3 +1,4 @@
+import random
 from pathlib import Path
 
 import cv2
@@ -56,7 +57,12 @@ def resize_patch(patch: torch.Tensor, size: int) -> torch.Tensor:
 
 
 def pca_scatter(
-    token_sets: list, pca_model: PCA | None, width: int, height: int, n_samples: int = 40
+    token_sets: list,
+    pca_model: PCA | None,
+    width: int,
+    height: int,
+    n_samples: int = 80,
+    draw_lines: bool = True,
 ) -> tuple:
     from mpl_toolkits.mplot3d import Axes3D  # noqa
 
@@ -75,6 +81,18 @@ def pca_scatter(
         pane.set_edgecolor("#222233")
     ax.grid(True, alpha=0.08)
     ax.view_init(elev=20, azim=45)
+    if draw_lines and len(projected) >= 2:
+        pts0 = projected[0][1][idx]
+        pts1 = projected[1][1][idx]
+        for p0, p1 in zip(pts0, pts1):
+            ax.plot(
+                [p0[0], p1[0]],
+                [p0[1], p1[1]],
+                [p0[2], p1[2]],
+                color="white",
+                alpha=0.45,
+                lw=0.8,
+            )
     for lbl, pts, color in projected:
         s = pts[idx]
         ax.scatter(
@@ -127,6 +145,7 @@ class SequenceVisualizer:
             f"→ {self.grid}×{self.grid} tokens | {self.device}"
         )
         self.cfgs = self._dist_configs()
+        self.viz_cfg = self._random_viz_cfg()
         self.transform = transforms.Compose(
             [
                 transforms.Resize(self.img_size + 32),
@@ -138,6 +157,10 @@ class SequenceVisualizer:
         print("Configurations distance :")
         for c in self.cfgs:
             print(f"  {c['name']:8s}: row={c['x']}, col={c['y']}, taille={c['size']}px")
+        print(
+            f"Position visu (aléatoire) : row={self.viz_cfg['x']}, col={self.viz_cfg['y']}, "
+            f"taille={self.viz_cfg['size']}px"
+        )
 
     def _dist_configs(self) -> list[dict]:
         configs = []
@@ -153,6 +176,14 @@ class SequenceVisualizer:
             y = min(int((self.img_size - eff) * PATCH_Y_RATIO), self.img_size - eff - 1)
             configs.append({"name": name, "x": x, "y": y, "size": eff})
         return configs
+
+    def _random_viz_cfg(self) -> dict:
+        row_ratio = random.uniform(PATCH_MIN_ROW_RATIO, 0.78)
+        y_ratio = random.uniform(PATCH_Y_RATIO, min(PATCH_Y_RATIO + 0.10, 0.97))
+        x = int(self.img_size * row_ratio)
+        eff = compute_perspective_size(x, self.img_size, PATCH_SIZE, PATCH_PERSPECTIVE_MIN_SCALE)
+        y = min(int((self.img_size - eff) * y_ratio), self.img_size - eff - 1)
+        return {"name": "visu", "x": x, "y": y, "size": eff}
 
     def get_tokens(self, img_tensor: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
@@ -172,13 +203,30 @@ class SequenceVisualizer:
 
     def process_frame(
         self, img_tensor: torch.Tensor, size: int
-    ) -> tuple[list, list, int, list, np.ndarray, list]:
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        list,
+        int,
+        np.ndarray,
+        float,
+        bool,
+    ]:
         tokens_ref = self.get_tokens(img_tensor)
         ref_vis, ref_preds = self.clf_vis(tokens_ref, size)
         ref_bgr = cv2.cvtColor(ref_vis, cv2.COLOR_RGB2BGR)
         n_src = int((ref_preds == SOURCE_CLASS).sum())
         cv2.putText(
-            ref_bgr, "Original", (5, size - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1
+            ref_bgr,
+            "Seg Original",
+            (5, size - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            (200, 200, 200),
+            1,
         )
         if n_src == 0:
             cv2.putText(
@@ -190,109 +238,152 @@ class SequenceVisualizer:
                 (150, 150, 150),
                 1,
             )
-        panels = [ref_bgr]
-        heatmaps = []
-        token_sets = [("Clean", tokens_ref.cpu().numpy(), "#4fc3f7")]
-        metrics: list[tuple[float, bool]] = []
-        _colors = ["#1E88E5", "#FF9800", "#E53935"]
 
-        for di, cfg in enumerate(self.cfgs):
-            patch_d = resize_patch(self.patch, cfg["size"])
-            patched = apply_patch(img_tensor, patch_d, (cfg["x"], cfg["y"]))
-            tokens_d = self.get_tokens(patched)
-            adv_vis, adv_preds = self.clf_vis(tokens_d, size)
-            adv_bgr = cv2.cvtColor(adv_vis, cv2.COLOR_RGB2BGR)
-            n_adv = int((adv_preds == SOURCE_CLASS).sum())
-            fr = max(0.0, min(1.0, (n_src - n_adv) / n_src if n_src > 0 else 0.0))
-            gone = n_adv == 0 and n_src > 0
-            metrics.append((fr, gone))
-            if gone:
-                cv2.rectangle(adv_bgr, (0, 0), (size - 1, size - 1), (0, 0, 255), 4)
-                cv2.putText(
-                    adv_bgr,
-                    "DISPARU!",
-                    (size // 5, size // 2),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.9,
-                    (0, 0, 255),
-                    2,
-                )
-            else:
-                g, r = int(200 * fr), int(200 * (1 - fr))
-                cv2.putText(
-                    adv_bgr,
-                    f"FR: {fr:.0%}",
-                    (8, size // 2),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    (0, g, r),
-                    2,
-                )
+        ref_preds_2d = ref_preds.reshape(self.grid, self.grid)
+        cfg = self.viz_cfg
+        patch_d = resize_patch(self.patch, cfg["size"])
+        patched = apply_patch(img_tensor, patch_d, (cfg["x"], cfg["y"]))
+        tokens_d = self.get_tokens(patched)
+        adv_vis, adv_preds = self.clf_vis(tokens_d, size)
+        n_adv = int((adv_preds == SOURCE_CLASS).sum())
+        n_fooled = int(((ref_preds == SOURCE_CLASS) & (adv_preds != SOURCE_CLASS)).sum())
+        fr = n_fooled / n_src if n_src > 0 else 0.0
+        gone = n_adv == 0 and n_src > 0
+
+        # Image + patch panel
+        patched_np = (patched.permute(1, 2, 0).cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+        img_panel = cv2.resize(cv2.cvtColor(patched_np, cv2.COLOR_RGB2BGR), (size, size))
+        # Green rectangle showing patch position (perspective-scaled)
+        scale = size / self.img_size
+        px = int(cfg["y"] * scale)
+        py = int(cfg["x"] * scale)
+        ps = int(cfg["size"] * scale)
+        cv2.rectangle(img_panel, (px, py), (px + ps, py + ps), (0, 255, 0), 2)
+        cv2.putText(
+            img_panel,
+            "Image + Patch",
+            (5, size - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            (200, 200, 200),
+            1,
+        )
+        # Attacked segmentation panel
+        adv_bgr = cv2.cvtColor(adv_vis, cv2.COLOR_RGB2BGR)
+        cv2.putText(
+            adv_bgr,
+            "Seg Attacked",
+            (5, size - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            (200, 200, 200),
+            1,
+        )
+        # Semantic diff: green = source tokens surviving, red = source tokens fooled
+        adv_preds_2d = adv_preds.reshape(self.grid, self.grid)
+        diff = np.full((self.grid, self.grid, 3), OTHER_COLOR, dtype=np.uint8)
+        for c in FOCUS_CLASSES:
+            if c != SOURCE_CLASS:
+                diff[ref_preds_2d == c] = CITYSCAPES_COLORS[c]
+        diff[(ref_preds_2d == SOURCE_CLASS) & (adv_preds_2d == SOURCE_CLASS)] = [30, 200, 30]
+        diff[(ref_preds_2d == SOURCE_CLASS) & (adv_preds_2d != SOURCE_CLASS)] = [220, 30, 30]
+        diff = cv2.resize(diff, (size, size), interpolation=cv2.INTER_NEAREST).astype(np.uint8)
+        diff_panel = cv2.cvtColor(diff, cv2.COLOR_RGB2BGR)
+        if gone:
+            cv2.rectangle(diff_panel, (0, 0), (size - 1, size - 1), (0, 0, 255), 4)
             cv2.putText(
-                adv_bgr,
-                f"{cfg['name']} ({cfg['size']}px)",
-                (5, size - 8),
+                diff_panel,
+                "DISPARU!",
+                (size // 5, size // 2),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                (200, 200, 200),
-                1,
+                0.9,
+                (0, 0, 255),
+                2,
             )
-            panels.append(adv_bgr)
-            token_sets.append((cfg["name"], tokens_d.cpu().numpy(), _colors[di]))
-            dists = torch.norm(tokens_d - tokens_ref, dim=1).cpu().numpy()
-            n_p = self.grid * self.grid
-            dists = np.concatenate([dists, np.zeros(max(0, n_p - len(dists)))])[:n_p]
-            dm = dists.reshape(self.grid, self.grid)
-            dm = cv2.resize(dm, (size, size), interpolation=cv2.INTER_NEAREST)
-            dm = (dm / (dm.max() + 1e-8) * 255).astype(np.uint8)
-            heatmaps.append(cv2.applyColorMap(dm, cv2.COLORMAP_HOT))
-
-        return panels, heatmaps, n_src, token_sets, ref_preds, metrics
+        cv2.putText(
+            diff_panel,
+            f"{self.src_name} → ?",
+            (5, size - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            (200, 200, 200),
+            1,
+        )
+        # L2 heatmap
+        dists = torch.norm(tokens_d - tokens_ref, dim=1).cpu().numpy()
+        n_p = self.grid * self.grid
+        dists = np.concatenate([dists, np.zeros(max(0, n_p - len(dists)))])[:n_p]
+        dm = dists.reshape(self.grid, self.grid)
+        dm = cv2.resize(dm, (size, size), interpolation=cv2.INTER_NEAREST)
+        dm = (dm / (dm.max() + 1e-8) * 255).astype(np.uint8)
+        heatmap = cv2.applyColorMap(dm, cv2.COLORMAP_HOT)
+        token_sets = [
+            ("Clean", tokens_ref.cpu().numpy(), "#4fc3f7"),
+            ("Attaqué", tokens_d.cpu().numpy(), "#ef5350"),
+        ]
+        return (
+            img_panel,
+            ref_bgr,
+            adv_bgr,
+            diff_panel,
+            heatmap,
+            token_sets,
+            n_src,
+            ref_preds,
+            fr,
+            gone,
+        )
 
     def build_frame(
         self,
-        panels: list,
-        heatmaps: list,
+        img_panel: np.ndarray,
+        ref_panel: np.ndarray,
+        adv_panel: np.ndarray,
+        diff_panel: np.ndarray,
+        heatmap: np.ndarray,
         scatter: np.ndarray,
         legend: np.ndarray,
         n_src: int,
+        fr: float,
         frame_idx: int,
         img_path: Path,
         size: int,
     ) -> np.ndarray:
+        g, r = int(200 * fr), int(200 * (1 - fr))
+        cv2.putText(
+            legend,
+            f"FR: {fr:.0%}",
+            (10, size - 12),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, g, r),
+            2,
+        )
         empty = np.full((size, size // 2, 3), 30, dtype=np.uint8)
-        row1 = np.hstack(panels + [legend])
-        row2 = np.hstack([scatter] + heatmaps + [empty])
+        row1 = np.hstack([img_panel, ref_panel, adv_panel, diff_panel, legend])
+        row2 = np.hstack([scatter, heatmap, empty])
         frame = np.vstack([row1, row2])
         cv2.putText(
-            frame, "Original", (5, size - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1
+            frame,
+            "Embeddings DINOv3 — PCA 3D",
+            (5, 2 * size - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            (200, 200, 200),
+            1,
         )
-        for i, cfg in enumerate(self.cfgs):
-            cv2.putText(
-                frame,
-                cfg["name"],
-                ((i + 1) * size + 5, size - 8),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
-                (200, 200, 200),
-                1,
-            )
-        cv2.putText(
-            frame, "PCA 3D", (5, 2 * size - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1
-        )
-        for i, cfg in enumerate(self.cfgs):
-            cv2.putText(
-                frame,
-                f"Perturb. {cfg['name']}",
-                ((i + 1) * size + 5, 2 * size - 8),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
-                (200, 200, 200),
-                1,
-            )
         cv2.putText(
             frame,
-            f"{self.src_name}: {n_src} tokens | frame {frame_idx + 1}",
+            "Perturbation L2",
+            (3 * size + 5, 2 * size - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            (200, 200, 200),
+            1,
+        )
+        cv2.putText(
+            frame,
+            f"Fooling: {n_src} tokens | frame {frame_idx + 1}",
             (10, 22),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
@@ -304,51 +395,45 @@ class SequenceVisualizer:
         )
         return frame
 
-    def save_analysis(self, fooling_history: list, disappeared_frames: list) -> None:
-        if not fooling_history or not len(fooling_history[0]):
+    def save_analysis(self, fooling_history: list[float], disappeared_frames: list[int]) -> None:
+        if not fooling_history:
             return
-        n_frames = len(fooling_history[0])
+        cfg = self.cfgs[1]  # Moyen — medium distance
+        n_frames = len(fooling_history)
         x = np.arange(n_frames)
-        plot_colors = ["#2196F3", "#FF9800", "#F44336"]
         fig, (ax1, ax2) = plt.subplots(
             2, 1, figsize=(14, 7), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
         )
-        for di, cfg in enumerate(self.cfgs):
-            ax1.plot(
-                x,
-                fooling_history[di],
-                color=plot_colors[di],
-                lw=2,
-                label=f"{cfg['name']} ({cfg['size']}px)",
+        ax1.plot(
+            x, fooling_history, color="#2196F3", lw=2, label=f"{cfg['name']} ({cfg['size']}px)"
+        )
+        if disappeared_frames:
+            ax1.scatter(
+                disappeared_frames,
+                [fooling_history[f] for f in disappeared_frames],
+                color="#2196F3",
+                marker="v",
+                s=100,
+                zorder=5,
             )
-            if disappeared_frames[di]:
-                ax1.scatter(
-                    disappeared_frames[di],
-                    [fooling_history[di][f] for f in disappeared_frames[di]],
-                    color=plot_colors[di],
-                    marker="v",
-                    s=100,
-                    zorder=5,
-                )
         ax1.axhline(1.0, color="gray", ls="--", alpha=0.4, lw=1)
-        ax1.set_ylabel("Taux de tromperie")
+        ax1.set_ylabel("Fooling rate")
         ax1.set_ylim(-0.05, 1.15)
-        ax1.set_title(f"Erreur de perception — '{self.src_name}' — 3 distances (▼ = disparition)")
+        ax1.set_title(f"Adversarial patch — '{self.src_name}' (▼ = disappeared)")
         ax1.legend(loc="upper right")
         ax1.grid(True, alpha=0.3)
-        for di, cfg in enumerate(self.cfgs):
-            gone_set = set(disappeared_frames[di])
-            signal = np.array([1 if f in gone_set else 0 for f in range(n_frames)], dtype=float)
-            pct = 100 * len(disappeared_frames[di]) // max(1, n_frames)
-            ax2.fill_between(
-                x,
-                signal,
-                step="mid",
-                alpha=0.65,
-                color=plot_colors[di],
-                label=f"{cfg['name']}: {len(disappeared_frames[di])} frames ({pct}%)",
-            )
-        ax2.set_ylabel("Disparu")
+        gone_set = set(disappeared_frames)
+        signal = np.array([1 if f in gone_set else 0 for f in range(n_frames)], dtype=float)
+        pct = 100 * len(disappeared_frames) // max(1, n_frames)
+        ax2.fill_between(
+            x,
+            signal,
+            step="mid",
+            alpha=0.65,
+            color="#2196F3",
+            label=f"{len(disappeared_frames)} frames disappeared ({pct}%)",
+        )
+        ax2.set_ylabel("Gone")
         ax2.set_xlabel("Frame")
         ax2.set_ylim(0, 1.5)
         ax2.set_yticks([])
@@ -368,15 +453,15 @@ class SequenceVisualizer:
         if not image_paths:
             return
         size = VIZ_SEQ_SIZE
-        width = size * 4 + size // 2
-        height = size * 2
+        width = size * 4 + size // 2  # img+patch | seg orig | seg atk | diff | legend
+        height = size * 2  # row1: panels  row2: pca(3×) + heatmap + empty
         DEMO_DIR.mkdir(parents=True, exist_ok=True)
         out_path = DEMO_DIR / (Path(VIZ_DATASET).name + ".mp4")
         fourcc: int = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
         writer = cv2.VideoWriter(str(out_path), fourcc, FPS, (width, height))
         print(f"Vidéo → {out_path}")
-        fooling_history: list[list[float]] = [[] for _ in self.cfgs]
-        disappeared_frames: list[list[int]] = [[] for _ in self.cfgs]
+        fooling_history: list[float] = []
+        disappeared_frames: list[int] = []
         global_pca: PCA | None = None
         cv2.namedWindow("Patch Attack Visualization", cv2.WINDOW_NORMAL)
 
@@ -384,17 +469,38 @@ class SequenceVisualizer:
             img_tensor = self.transform(Image.open(img_path).convert("RGB")).to(self.device)
             if REFRESH > 0 and frame_idx % REFRESH == 0:
                 global_pca = None
-            panels, heatmaps, n_src, token_sets, ref_preds, metrics = self.process_frame(
-                img_tensor, size
-            )
-            for di, (fr, gone) in enumerate(metrics):
-                fooling_history[di].append(fr)
-                if gone:
-                    disappeared_frames[di].append(len(fooling_history[di]) - 1)
+            (
+                img_panel,
+                ref_panel,
+                adv_panel,
+                diff_panel,
+                heatmap,
+                token_sets,
+                n_src,
+                ref_preds,
+                fr,
+                gone,
+            ) = self.process_frame(img_tensor, size)
+            fooling_history.append(fr)
+            if gone:
+                disappeared_frames.append(len(fooling_history) - 1)
             legend = create_legend(size, np.unique(ref_preds), focus_classes=FOCUS_CLASSES)
-            scatter, global_pca = pca_scatter(token_sets, global_pca, size, size)
+            scatter, global_pca = pca_scatter(
+                token_sets, global_pca, 3 * size, size, draw_lines=True
+            )
             frame = self.build_frame(
-                panels, heatmaps, scatter, legend, n_src, frame_idx, img_path, size
+                img_panel,
+                ref_panel,
+                adv_panel,
+                diff_panel,
+                heatmap,
+                scatter,
+                legend,
+                n_src,
+                fr,
+                frame_idx,
+                img_path,
+                size,
             )
             writer.write(frame)
             cv2.imshow("Patch Attack Visualization", frame)
