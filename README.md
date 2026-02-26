@@ -12,6 +12,7 @@ This project trains adversarial patches that fool a semantic segmentation classi
 1. **Train a classifier** — linear probe on DINOv3 tokens, trained on Cityscapes labels
 2. **Train an adversarial patch** — optimized to fool the classifier on a target class
 3. **Visualize** — sequence visualization showing segmentation before/after attack
+4. **Evaluate transferability** — test if the DINOv3 patch also fools YOLOv8 detection
 
 ---
 
@@ -32,6 +33,9 @@ python scripts/attack_classifier.py
 
 # 3. Visualize on a sequence
 python scripts/visualize_sequence.py --patch results/targeted_patch_final.pt --mode classifier
+
+# 4. Evaluate transferability to YOLOv8
+python scripts/eval_transferability.py --dataset data/stuttgart_02 --patch results/targeted_patch_best.pt
 ```
 
 All default parameters are configured in `src/utils/config.py` — no CLI arguments required.
@@ -51,6 +55,7 @@ All default parameters are configured in `src/utils/config.py` — no CLI argume
 │   ├── train_classifier.py         # Train linear probe on Cityscapes tokens
 │   ├── attack_classifier.py        # Train adversarial patch against classifier
 │   ├── visualize_sequence.py       # Visualize attack effect on image sequence
+│   ├── eval_transferability.py     # Evaluate patch transferability to YOLOv8
 │   └── train_dataset.py            # Universal embedding attack on dataset
 ├── src/
 │   ├── models/
@@ -81,9 +86,9 @@ CLF_LR = 0.001
 # Attack
 SOURCE_CLASS = 11       # person
 TARGET_CLASS = -1       # -1 = untargeted
-ATTACK_STEPS = 2000
+ATTACK_STEPS = 3000
 ATTACK_LR = 0.05
-PATCH_SIZE = 112        # Patch size on image (~17% of IMG_SIZE)
+PATCH_SIZE = 132        # Patch size on image (~17% of IMG_SIZE)
 PATCH_RES = 256         # Internal optimization resolution
 PATCH_PERSPECTIVE_MIN_SCALE = 0.3  # Perspective scaling (0.3 = 3× smaller at top)
 
@@ -163,8 +168,8 @@ Only focus classes are colored (road, person, car); all others appear gray. Pres
 |-------|---------|-------------|
 | `--source-class` | 11 (person) | Class to fool |
 | `--target-class` | -1 | Target class (-1 = any misclassification) |
-| `--steps` | 2000 | Optimization steps |
-| `--patch-size` | 112 | Patch size on image (pixels) |
+| `--steps` | 3000 | Optimization steps |
+| `--patch-size` | 132 | Patch size on image (pixels) |
 | `--patch-res` | 256 | Internal patch resolution (optimized size) |
 | `--perspective-min-scale` | 0.3 | Min scale factor at top of image (1.0 = disabled) |
 | `--lr` | 0.05 | Learning rate |
@@ -221,9 +226,9 @@ Diff: green = source class unchanged, red = successfully fooled.
 | Param | Default | Description |
 |-------|---------|-------------|
 | `--patch` | required | Path to patch file (.pt) |
-| `--dataset` | `data/stuttgart_00` | Image folder |
+| `--dataset` | `data/stuttgart_02` | Image folder |
 | `--classifier` | `results/classifier.pt` | Classifier checkpoint |
-| `--patch-size` | 112 | Patch size (auto-resizes if saved at different size) |
+| `--patch-size` | 132 | Patch size (auto-resizes if saved at different size) |
 | `--patch-pos` | `50 50` | Patch position (row, col) |
 | `--mode` | `all` | Visualization mode |
 | `--size` | 300 | Panel size (px) |
@@ -236,6 +241,48 @@ Diff: green = source class unchanged, red = successfully fooled.
 | `--output` | None | Save to MP4 |
 
 **Controls:** `q` quit · `Space` pause/resume
+
+---
+
+## Step 4 — Evaluate Transferability
+
+Tests whether the adversarial patch optimized on DINOv3 segmentation also degrades YOLOv8 person detection — without any retraining.
+
+```bash
+# Interactive display
+python scripts/eval_transferability.py \
+    --dataset data/stuttgart_02 \
+    --patch results/targeted_patch_best.pt
+
+# Save as video
+python scripts/eval_transferability.py \
+    --dataset data/stuttgart_02 \
+    --patch results/targeted_patch_best.pt \
+    --output results/transfer_eval.mp4
+```
+
+**Layout:**
+
+```
+[ Clean (YOLO) | Attacked (YOLO) | Patch | Metrics ]
+```
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `--dataset` | `data/stuttgart_02` | Image folder |
+| `--patch` | `results/targeted_patch_best.pt` | Adversarial patch file |
+| `--yolo-model` | `yolov8n.pt` | YOLO model (auto-downloaded) |
+| `--conf` | 0.25 | YOLO confidence threshold |
+| `--patch-size` | 132 | Patch size on image |
+| `--perspective-min-scale` | 0.3 | Perspective scaling factor |
+| `--size` | 300 | Display panel size (px) |
+| `--fps` | 10 | Video FPS |
+| `--max-images` | 0 | Limit images (0 = all) |
+| `--output` | None | Save to MP4 |
+
+**Metrics reported:** average detections (clean vs attacked), disappearance rate, average confidence drop.
+
+Requires `ultralytics` (`pip install ultralytics`). The YOLO weights are downloaded automatically on first run.
 
 ---
 

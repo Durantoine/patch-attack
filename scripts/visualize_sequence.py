@@ -57,12 +57,10 @@ def load_model():
 
 
 def get_patch_tokens(model, image):
-    """Extract normalized patch tokens."""
+    """Extract patch tokens (CLS already stripped by get_intermediate_layers)."""
     with torch.no_grad():
         features = model.get_intermediate_layers(image.unsqueeze(0), n=1)[0]
-    tokens = features[0, 1:]  # remove CLS
-    tokens = F.normalize(tokens, dim=1)
-    return tokens
+    return features[0]
 
 
 def apply_patch(image, patch, pos):
@@ -569,6 +567,13 @@ def main():
     cv2.namedWindow('Patch Attack Visualization', cv2.WINDOW_NORMAL)
     cv2.moveWindow('Patch Attack Visualization', 100, 100)
 
+    # Metrics accumulators (classifier mode)
+    clf_fooling_rates: list[float] = []
+    clf_source_counts: list[int] = []
+    clf_mse_list: list[float] = []
+    clf_disappeared: int = 0
+    clf_frames_with_source: int = 0
+
     # Process images
     print("\nProcessing images...")
 
@@ -646,6 +651,16 @@ def main():
             adv_clf_vis, adv_clf_preds = create_classifier_vis(tokens_adv, clf, size, smooth=args.smooth, grid=grid, focus_classes=focus_classes)
             clf_diff, fooling_rate, n_source = create_classifier_diff(
                 ref_clf_preds, adv_clf_preds, args.source_class, args.target_class, size, smooth=args.smooth, grid=grid)
+            # Accumulate metrics
+            clf_mse_list.append(mse)
+            if n_source > 0:
+                clf_frames_with_source += 1
+                clf_fooling_rates.append(fooling_rate)
+                clf_source_counts.append(n_source)
+                n_adv_source = int((adv_clf_preds == args.source_class).sum())
+                if n_adv_source == 0:
+                    clf_disappeared += 1
+
             present_classes = np.unique(np.concatenate([ref_clf_preds, adv_clf_preds]))
             clf_legend = create_legend(size, present_classes, focus_classes=focus_classes)
             ref_clf_vis = cv2.cvtColor(ref_clf_vis, cv2.COLOR_RGB2BGR)
@@ -858,6 +873,32 @@ def main():
         print(f"\nVideo saved to {args.output}")
 
     cv2.destroyAllWindows()
+
+    # Final report (classifier mode)
+    if args.mode == 'classifier' and clf_frames_with_source > 0:
+        avg_fr = float(np.mean(clf_fooling_rates))
+        avg_src = float(np.mean(clf_source_counts))
+        avg_mse = float(np.mean(clf_mse_list))
+        n_total = len(image_paths)
+        src_name = CLASS_NAMES[args.source_class]
+        tgt_name = "any" if args.target_class == -1 else CLASS_NAMES[args.target_class]
+
+        print("\n" + "=" * 50)
+        print("DINOV3 ATTACK RESULTS")
+        print("=" * 50)
+        print(f"Dataset           : {args.dataset}")
+        print(f"Patch             : {args.patch}")
+        print(f"Attack            : {src_name} -> {tgt_name}")
+        print(f"Images evaluated  : {n_total}")
+        print(f"Images w/ {src_name:8s}: {clf_frames_with_source}")
+        print()
+        print(f"Avg fooling rate  : {avg_fr:.1f}%")
+        print(f"Avg source tokens : {avg_src:.1f}/img")
+        print(f"Avg MSE           : {avg_mse:.4f}")
+        print()
+        print(f"Disappearance rate: {clf_disappeared}/{clf_frames_with_source} = {clf_disappeared / clf_frames_with_source:.1%}")
+        print(f"  (frames where all {src_name} tokens vanished)")
+        print("=" * 50)
 
     # Summary plot for multi-distance mode
     if args.mode == 'multi' and fooling_history and len(fooling_history[0]) > 0:

@@ -112,7 +112,7 @@ def main() -> None:
         img: torch.Tensor = img_tf(Image.open(img_path).convert('RGB')).unsqueeze(0).to(device)
         lbl: np.ndarray = labels_to_tokens(lbl_tf(Image.open(lbl_path)), grid=grid)
         with torch.no_grad():
-            tokens: torch.Tensor = F.normalize(model.get_intermediate_layers(img, n=1)[0][0, 1:], dim=-1)
+            tokens: torch.Tensor = model.get_intermediate_layers(img, n=1)[0][0]
         n_tokens: int = tokens.shape[0]
         all_tokens.append(tokens.cpu())
         all_labels.append(torch.from_numpy(lbl[:n_tokens]))
@@ -122,7 +122,7 @@ def main() -> None:
     tokens_cat: torch.Tensor = torch.cat(all_tokens)
     labels_cat: torch.Tensor = torch.cat(all_labels)
     valid: torch.Tensor = labels_cat != IGNORE
-    tokens_cat, labels_cat = tokens_cat[valid].to(device), labels_cat[valid].to(device).long()
+    tokens_cat, labels_cat = tokens_cat[valid], labels_cat[valid].long()
     print(f"{len(tokens_cat)} valid tokens")
 
     clf: nn.Linear = nn.Linear(384, 19).to(device)
@@ -139,11 +139,13 @@ def main() -> None:
         total_loss: float = 0.0
         for i in range(0, len(tokens_cat), 4096):
             idx: torch.Tensor = perm[i:i+4096]
-            logits: torch.Tensor = clf(tokens_cat[idx])
-            loss: torch.Tensor = F.cross_entropy(logits, labels_cat[idx])
+            batch_tok: torch.Tensor = tokens_cat[idx].to(device)
+            batch_lab: torch.Tensor = labels_cat[idx].to(device)
+            logits: torch.Tensor = clf(batch_tok)
+            loss: torch.Tensor = F.cross_entropy(logits, batch_lab)
             opt.zero_grad(); loss.backward(); opt.step()
             total_loss += loss.item() * len(idx)
-            correct += (logits.argmax(1) == labels_cat[idx]).sum().item()
+            correct += (logits.argmax(1) == batch_lab).sum().item()
         acc: float = correct / len(tokens_cat)
         avg_loss: float = total_loss / len(tokens_cat)
         print(f"Epoch {epoch+1}/{args.epochs} | Loss: {avg_loss:.4f} | Acc: {acc:.3f}")

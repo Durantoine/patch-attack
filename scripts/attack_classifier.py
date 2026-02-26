@@ -183,7 +183,7 @@ def main() -> None:
     for p in tqdm(paths, desc="Filtering"):
         img: torch.Tensor = tf(Image.open(p).convert('RGB'))
         with torch.no_grad():
-            tokens: torch.Tensor = F.normalize(model.get_intermediate_layers(img.unsqueeze(0).to(device), n=1)[0][0, 1:], dim=-1)
+            tokens: torch.Tensor = model.get_intermediate_layers(img.unsqueeze(0).to(device), n=1)[0][0]
             preds: torch.Tensor = clf(tokens).argmax(-1)
         if (preds == args.source_class).sum() >= args.min_source_tokens:
             imgs.append(img)
@@ -219,7 +219,7 @@ def main() -> None:
 
         # Reference predictions first — needed to avoid placing patch on source class
         with torch.no_grad():
-            ref_tokens: torch.Tensor = F.normalize(model.get_intermediate_layers(batch, n=1)[0][:, 1:], dim=-1)
+            ref_tokens: torch.Tensor = model.get_intermediate_layers(batch, n=1)[0]
             ref_preds: torch.Tensor = clf(ref_tokens).argmax(-1)  # [B, grid*grid]
         source_mask: torch.Tensor = ref_preds == args.source_class
         if source_mask.sum() < args.min_source_tokens: continue
@@ -250,7 +250,7 @@ def main() -> None:
             effective_sizes.append(eff)
 
         patched: torch.Tensor = apply_patch(batch.detach(), patch, effective_sizes, positions)
-        adv_tokens: torch.Tensor = F.normalize(model.get_intermediate_layers(patched, n=1)[0][:, 1:], dim=-1)
+        adv_tokens: torch.Tensor = model.get_intermediate_layers(patched, n=1)[0]
         adv_logits: torch.Tensor = clf(adv_tokens)
 
         if untargeted:
