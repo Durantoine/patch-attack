@@ -20,7 +20,8 @@ Adversarial patch attacks on a semantic classifier built on top of DINOv3 (ViT-S
 ```
 1. train_classifier.py   → train a linear probe on DINOv3 tokens (Cityscapes)
 2. generate_patch.py     → optimize an adversarial patch against the classifier
-3. visualize_sequence.py → visualize the attack on a sequence + export video
+3. visualize_sequence.py → visualize the attack on a driving sequence + export video
+4. eval_transfer.py      → evaluate patch transferability to YOLOv8 detection
 ```
 
 ---
@@ -42,6 +43,9 @@ python -m patch_attack.generate_patch
 
 # 3. Visualize on a sequence
 python -m patch_attack.visualize_sequence
+
+# 4. Evaluate transferability to YOLO (requires: pip install ultralytics)
+python -m patch_attack.eval_transfer
 ```
 
 Or after `uv sync`: `train-classifier` · `generate-patch` · `visualize-sequence`
@@ -76,14 +80,16 @@ inv lint       # ruff only
 │   ├── targeted_attack_results.png # Fooling rate curve + patch
 │   ├── patch_evolution/            # Patch snapshots during training
 │   ├── patch_evolution.mp4         # Patch evolution video
+│   ├── transfer_stuttgart_02.png       # YOLO transfer evaluation graph
 │   └── demo/
-│       ├── stuttgart_02.mp4        # Attack video on sequence
-│       └── stuttgart_02_analysis.png  # Fooling rate graph across 3 distances
+│       ├── stuttgart_02.mp4            # Attack video on sequence
+│       └── stuttgart_02_analysis.png   # Fooling rate graph + disappearance frames
 └── src/
     └── patch_attack/
         ├── train_classifier.py
         ├── generate_patch.py
         ├── visualize_sequence.py
+        ├── eval_transfer.py
         ├── utils/
         │   ├── config.py           # All parameters
         │   └── viz.py              # Visualization utilities
@@ -110,7 +116,7 @@ OUTPUT_DIR        = "results"
 
 IMG_SIZE = 896      # 224=14×14 | 448=28×28 | 672=42×42 | 896=56×56 tokens
 
-CLF_EPOCHS = 200
+CLF_EPOCHS = 250
 CLF_LR     = 0.001
 
 SOURCE_CLASS             = 11    # person (0=road, 13=car, …)
@@ -122,6 +128,10 @@ ATTACK_MIN_SOURCE_TOKENS = 10    # images filtered if < N source tokens
 PATCH_SIZE               = 140   # size on the image (~16% of IMG_SIZE)
 PATCH_RES                = 512   # internal optimization resolution
 PATCH_PERSPECTIVE_MIN_SCALE = 0.3  # 3× smaller at top (far) than bottom (near)
+
+YOLO_MODEL        = "yolov8n.pt"
+YOLO_CONF         = 0.25
+YOLO_PERSON_CLASS = 0              # COCO class index for "person"
 ```
 
 > [!TIP]
@@ -170,23 +180,41 @@ Press `q` to stop early.
 
 ## Step 3 — Sequence Visualization
 
-Applies the patch to each frame and displays the effect in **multi-distance mode** (far / medium / near) with correct perspective scaling at each distance.
+Applies the patch to each frame at a randomly chosen position (fixed for the entire run, perspective-scaled) and displays the effect.
 
 **Layout:**
 ```
-Row 1 : [ Original Seg | Far | Medium | Near | Legend ]
-Row 2 : [ PCA 3D scatter | L2 Heatmap Far | Medium | Near ]
+Row 1 : [ Image+Patch | Seg Original | Seg Attacked | Diff | Legend+FR ]
+Row 2 : [ PCA 3D scatter (Clean vs Attacked) | L2 Heatmap |            ]
 ```
 
-**Per-distance indicators:**
-- `FR: XX%` — fooling rate (% of source tokens misclassified)
-- Red border + `GONE!` — all source tokens have disappeared
+**Diff panel** (vert/rouge):
+- Vert — tokens source encore détectés après l'attaque
+- Rouge — tokens source trompés
+- Cadre bleu + `DISPARU!` — tous les tokens source ont disparu
 
 **Controls:** `q` quit · `Space` pause
 
 **Outputs:**
 - `results/demo/<dataset>.mp4` — attack video
 - `results/demo/<dataset>_analysis.png` — fooling rate graph + disappearance frames
+
+---
+
+## Step 4 — Transfer Evaluation
+
+Evaluates whether the DINOv3-trained patch also degrades **YOLOv8 person detection** without any retraining.
+
+```bash
+pip install ultralytics   # one-time
+python -m patch_attack.eval_transfer
+```
+
+**Metrics:** avg detections clean vs attacked, detection drop, disappearance rate, confidence drop.
+
+**Outputs:**
+- Live window — clean | attacked | patch | running metrics
+- `results/transfer_<dataset>.png` — detections over time + disappearance signal
 
 ---
 

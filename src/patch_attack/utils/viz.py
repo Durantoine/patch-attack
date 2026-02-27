@@ -4,6 +4,7 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 CLASS_NAMES: list[str] = [
     "road",
@@ -82,10 +83,6 @@ DEFAULT_FOCUS_CLASSES: list[int] = [0, 11, 13]  # road, person, car
 def colorize_preds(
     preds: np.ndarray, grid: int, size: int, focus_classes: list[int] | None = None
 ) -> np.ndarray:
-    """Prediction array -> colored BGR image.
-
-    If focus_classes is set, only those classes are colored; the rest is gray.
-    """
     if focus_classes is None:
         focus_classes = DEFAULT_FOCUS_CLASSES
     n = grid * grid
@@ -102,14 +99,8 @@ def colorize_preds(
 def create_legend(
     size: int, present_classes: np.ndarray | None = None, focus_classes: list[int] | None = None
 ) -> np.ndarray:
-    """Create a vertical color legend.
-
-    If focus_classes is set, show those + 'other'.
-    Else if present_classes is set, show only those.
-    Else use DEFAULT_FOCUS_CLASSES.
-    """
-    legend_w: int = size // 2
-    legend: np.ndarray = np.zeros((size, legend_w, 3), dtype=np.uint8)
+    legend_w = size // 2
+    legend = np.zeros((size, legend_w, 3), dtype=np.uint8)
     legend[:] = 30
     if focus_classes is not None:
         classes: list[int] = sorted(focus_classes) + [-1]
@@ -117,22 +108,21 @@ def create_legend(
         classes = sorted(set(int(c) for c in present_classes))
     else:
         classes = sorted(DEFAULT_FOCUS_CLASSES) + [-1]
-    n: int = len(classes)
-    box: int = 24
-    font_scale: float = 0.7
-    spacing: int = min(size // (n + 1), box + 20)
-    y_start: int = max(15, (size - n * spacing) // 2)
+    box = 24
+    font_scale = 0.7
+    spacing = min(size // (len(classes) + 1), box + 20)
+    y_start = max(15, (size - len(classes) * spacing) // 2)
     for idx, cls_id in enumerate(classes):
-        y: int = y_start + idx * spacing
+        y = y_start + idx * spacing
         if y + box > size:
             break
         if cls_id == -1:
             rgb: np.ndarray = OTHER_COLOR
-            name: str = "other"
+            name = "other"
         else:
             rgb = CITYSCAPES_COLORS[cls_id]
             name = CLASS_NAMES_SHORT[cls_id]
-        color: tuple[int, ...] = (int(rgb[2]), int(rgb[1]), int(rgb[0]))  # RGB -> BGR
+        color: tuple[int, int, int] = (int(rgb[2]), int(rgb[1]), int(rgb[0]))
         cv2.rectangle(legend, (10, y), (10 + box, y + box), color, -1)
         cv2.rectangle(legend, (10, y), (10 + box, y + box), (200, 200, 200), 1)
         cv2.putText(
@@ -148,18 +138,48 @@ def create_legend(
 
 
 def compute_perspective_size(x: int, img_size: int, max_size: int, min_scale: float) -> int:
-    """Patch size based on vertical position: smaller = higher = farther."""
     t = min(1.0, (x + max_size / 2) / img_size)
     scale = min_scale + (1.0 - min_scale) * t
     return max(1, int(max_size * scale))
 
 
 def patch_to_img(patch: torch.Tensor, size: int) -> np.ndarray:
-    """Patch tensor (3,H,W) -> BGR image."""
     img = np.clip(patch.detach().cpu().permute(1, 2, 0).numpy(), 0, 1)
     img = (img * 255).astype(np.uint8)
     img = cv2.resize(img, (size, size), interpolation=cv2.INTER_LINEAR)
     return np.asarray(cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+
+
+def tensor_to_bgr(t: torch.Tensor) -> np.ndarray:
+    arr = t.detach().cpu().permute(1, 2, 0).numpy().clip(0, 1)
+    return cv2.cvtColor((arr * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+
+
+def letterbox(img_bgr: np.ndarray, size: int) -> tuple[np.ndarray, float, int, int]:
+    h, w = img_bgr.shape[:2]
+    scale = min(size / w, size / h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    resized = cv2.resize(img_bgr, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    canvas = np.zeros((size, size, 3), dtype=np.uint8)
+    pad_x = (size - new_w) // 2
+    pad_y = (size - new_h) // 2
+    canvas[pad_y : pad_y + new_h, pad_x : pad_x + new_w] = resized
+    return canvas, scale, pad_x, pad_y
+
+
+def apply_patch(image: torch.Tensor, patch: torch.Tensor, pos: tuple[int, int]) -> torch.Tensor:
+    x, y = pos
+    out = image.clone()
+    xe = min(x + patch.shape[1], image.shape[1])
+    ye = min(y + patch.shape[2], image.shape[2])
+    out[:, x:xe, y:ye] = patch[:, : xe - x, : ye - y]
+    return out
+
+
+def resize_patch(patch: torch.Tensor, size: int) -> torch.Tensor:
+    return F.interpolate(
+        patch.unsqueeze(0), (size, size), mode="bilinear", align_corners=False
+    ).squeeze(0)
 
 
 def make_evolution_video(

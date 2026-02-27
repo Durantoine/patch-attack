@@ -33,27 +33,13 @@ from .utils.viz import (
     CITYSCAPES_COLORS,
     CLASS_NAMES,
     OTHER_COLOR,
+    apply_patch,
     compute_perspective_size,
     create_legend,
+    resize_patch,
 )
 
 DEMO_DIR = Path("results/demo")
-
-
-def apply_patch(image: torch.Tensor, patch: torch.Tensor, pos: tuple) -> torch.Tensor:
-    x, y = pos
-    out = image.clone()
-    xe = min(x + patch.shape[1], image.shape[1])
-    ye = min(y + patch.shape[2], image.shape[2])
-    out[:, x:xe, y:ye] = patch[:, : xe - x, : ye - y]
-    return out
-
-
-def resize_patch(patch: torch.Tensor, size: int) -> torch.Tensor:
-    result: torch.Tensor = F.interpolate(
-        patch.unsqueeze(0), (size, size), mode="bilinear", align_corners=False
-    ).squeeze(0)
-    return result
 
 
 def pca_scatter(
@@ -137,9 +123,10 @@ class SequenceVisualizer:
         self.clf.eval()
         self.img_size: int = clf_data.get("img_size", 224)
         self.grid = self.img_size // 16
-        self.patch = torch.load(PATCH, map_location=self.device, weights_only=True).to(self.device)
-        if self.patch.shape[1] != PATCH_SIZE or self.patch.shape[2] != PATCH_SIZE:
-            self.patch = resize_patch(self.patch, PATCH_SIZE)
+        patch_raw: torch.Tensor = torch.load(PATCH, map_location=self.device, weights_only=True)
+        if patch_raw.ndim == 4:
+            patch_raw = patch_raw[0]
+        self.patch = patch_raw.float().clamp(0, 1)
         print(
             f"Patch : {self.patch.shape} | Image {self.img_size}×{self.img_size} "
             f"→ {self.grid}×{self.grid} tokens | {self.device}"
@@ -178,8 +165,8 @@ class SequenceVisualizer:
         return configs
 
     def _random_viz_cfg(self) -> dict:
-        row_ratio = random.uniform(PATCH_MIN_ROW_RATIO, 0.78)
-        y_ratio = random.uniform(PATCH_Y_RATIO, min(PATCH_Y_RATIO + 0.10, 0.97))
+        row_ratio = random.uniform(0.50, 0.80)
+        y_ratio = random.uniform(0.88, 0.97)
         x = int(self.img_size * row_ratio)
         eff = compute_perspective_size(x, self.img_size, PATCH_SIZE, PATCH_PERSPECTIVE_MIN_SCALE)
         y = min(int((self.img_size - eff) * y_ratio), self.img_size - eff - 1)
@@ -268,8 +255,13 @@ class SequenceVisualizer:
             (200, 200, 200),
             1,
         )
-        # Attacked segmentation panel
-        adv_bgr = cv2.cvtColor(adv_vis, cv2.COLOR_RGB2BGR)
+        # Attacked segmentation panel: only SOURCE_CLASS tokens in green
+        adv_colored = np.full((self.grid, self.grid, 3), OTHER_COLOR, dtype=np.uint8)
+        adv_colored[adv_preds.reshape(self.grid, self.grid) == SOURCE_CLASS] = [30, 200, 30]
+        adv_bgr = cv2.cvtColor(
+            cv2.resize(adv_colored, (size, size), interpolation=cv2.INTER_NEAREST),
+            cv2.COLOR_RGB2BGR,
+        )
         cv2.putText(
             adv_bgr,
             "Seg Attacked",
@@ -279,13 +271,13 @@ class SequenceVisualizer:
             (200, 200, 200),
             1,
         )
-        # Semantic diff: green = source tokens surviving, red = source tokens fooled
+        # Semantic diff: green = person detected after attack, red = person fooled by attack
         adv_preds_2d = adv_preds.reshape(self.grid, self.grid)
         diff = np.full((self.grid, self.grid, 3), OTHER_COLOR, dtype=np.uint8)
         for c in FOCUS_CLASSES:
             if c != SOURCE_CLASS:
                 diff[ref_preds_2d == c] = CITYSCAPES_COLORS[c]
-        diff[(ref_preds_2d == SOURCE_CLASS) & (adv_preds_2d == SOURCE_CLASS)] = [30, 200, 30]
+        diff[adv_preds_2d == SOURCE_CLASS] = [30, 200, 30]
         diff[(ref_preds_2d == SOURCE_CLASS) & (adv_preds_2d != SOURCE_CLASS)] = [220, 30, 30]
         diff = cv2.resize(diff, (size, size), interpolation=cv2.INTER_NEAREST).astype(np.uint8)
         diff_panel = cv2.cvtColor(diff, cv2.COLOR_RGB2BGR)
@@ -398,7 +390,7 @@ class SequenceVisualizer:
     def save_analysis(self, fooling_history: list[float], disappeared_frames: list[int]) -> None:
         if not fooling_history:
             return
-        cfg = self.cfgs[1]  # Moyen — medium distance
+        cfg = self.viz_cfg
         n_frames = len(fooling_history)
         x = np.arange(n_frames)
         fig, (ax1, ax2) = plt.subplots(
