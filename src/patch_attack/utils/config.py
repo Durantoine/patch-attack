@@ -5,7 +5,7 @@ CITYSCAPES_LABELS = "data/gtFine_trainvaltest/gtFine/train"
 DATASET = "data/leftImg8bit_trainvaltest/leftImg8bit/train"
 VIZ_DATASET = "data/stuttgart/stuttgart_02"
 CLASSIFIER = "results/classifier.pt"
-PATCH = "results/targeted_patch_best.pt"
+PATCH = "results/targeted_patch_final.pt"
 OUTPUT_DIR = "results"
 
 IMG_SIZE = 896

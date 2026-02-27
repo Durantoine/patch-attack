@@ -12,13 +12,11 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from .utils.config import (
-    DATASET,
     IMG_SIZE,
     PATCH,
-    PATCH_MIN_ROW_RATIO,
     PATCH_PERSPECTIVE_MIN_SCALE,
     PATCH_SIZE,
-    PATCH_Y_RATIO,
+    VIZ_DATASET,
     VIZ_SEQ_SIZE,
     YOLO_CONF,
     YOLO_MODEL,
@@ -96,9 +94,9 @@ class TransferEvaluator:
         print(f"Patch chargé : {self.patch.shape} depuis {PATCH}")
 
     def _patch_position(self, H: int) -> tuple[int, int, int]:
-        x = int(H * PATCH_MIN_ROW_RATIO)
+        x = int(H * 0.65)
         eff = compute_perspective_size(x, H, PATCH_SIZE, PATCH_PERSPECTIVE_MIN_SCALE)
-        y = max(0, min(H - eff, int((H - eff) * PATCH_Y_RATIO)))
+        y = min(int((H - eff) * 0.925), H - eff - 1)
         return x, y, eff
 
     def _detect_persons(self, img_bgr: np.ndarray) -> list[dict]:
@@ -207,9 +205,9 @@ class TransferEvaluator:
         ])
         paths = sorted(
             p for ext in ("*.png", "*.jpg", "*.jpeg")
-            for p in Path(DATASET).resolve().glob(f"**/{ext}")
+            for p in Path(VIZ_DATASET).resolve().glob(f"**/{ext}")
         )
-        print(f"{len(paths)} images dans {DATASET}")
+        print(f"{len(paths)} images dans {VIZ_DATASET}")
         if not paths:
             return TransferMetrics()
 
@@ -249,7 +247,7 @@ class TransferEvaluator:
         ax1.fill_between(x, metrics.det_clean_history, metrics.det_attacked_history,
                          alpha=0.15, color="#2196f3")
         ax1.set_ylabel("Détections YOLO (person)")
-        ax1.set_title(f"Transférabilité DINOv3 → YOLO | {Path(DATASET).name} "
+        ax1.set_title(f"Transférabilité DINOv3 → YOLO | {Path(VIZ_DATASET).name} "
                       f"| taux disparition : {metrics.disappearance_rate:.1%}")
         ax1.legend(loc="upper right")
         ax1.grid(True, alpha=0.3)
@@ -266,7 +264,7 @@ class TransferEvaluator:
         ax2.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        out = Path("results") / f"transfer_{Path(DATASET).name}.png"
+        out = Path("results") / f"transfer_{Path(VIZ_DATASET).name}.png"
         out.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(out, dpi=150, bbox_inches="tight")
         print(f"Graphe → {out}")
@@ -276,7 +274,7 @@ class TransferEvaluator:
         print("\n" + "=" * 52)
         print("RÉSULTATS TRANSFÉRABILITÉ (DINOv3 patch → YOLO)")
         print("=" * 52)
-        print(f"Dataset          : {DATASET}")
+        print(f"Dataset          : {VIZ_DATASET}")
         print(f"Patch            : {PATCH}")
         print(f"Images évaluées  : {metrics.n_images}")
         print(f"Images w/ person : {metrics.images_with_person}")

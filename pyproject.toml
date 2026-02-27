@@ -19,6 +19,7 @@ dependencies = [
     "regex>=2023.0.0",
     "opencv-python>=4.8.0",
     "kornia>=0.7.0",
+    "ultralytics>=8.0.0",
 ]
 
 [project.scripts]
