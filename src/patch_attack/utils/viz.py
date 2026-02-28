@@ -4,6 +4,7 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 CLASS_NAMES: list[str] = [
     "road",
@@ -160,6 +161,39 @@ def patch_to_img(patch: torch.Tensor, size: int) -> np.ndarray:
     img = (img * 255).astype(np.uint8)
     img = cv2.resize(img, (size, size), interpolation=cv2.INTER_LINEAR)
     return np.asarray(cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+
+
+def tensor_to_bgr(t: torch.Tensor) -> np.ndarray:
+    arr = t.detach().cpu().permute(1, 2, 0).numpy().clip(0, 1)
+    return np.asarray(cv2.cvtColor((arr * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
+
+
+def letterbox(img_bgr: np.ndarray, size: int) -> tuple[np.ndarray, float, int, int]:
+    h, w = img_bgr.shape[:2]
+    scale = min(size / w, size / h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    resized = cv2.resize(img_bgr, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    canvas = np.zeros((size, size, 3), dtype=np.uint8)
+    pad_x = (size - new_w) // 2
+    pad_y = (size - new_h) // 2
+    canvas[pad_y : pad_y + new_h, pad_x : pad_x + new_w] = resized
+    return canvas, scale, pad_x, pad_y
+
+
+def apply_patch(image: torch.Tensor, patch: torch.Tensor, pos: tuple[int, int]) -> torch.Tensor:
+    x, y = pos
+    out = image.clone()
+    xe = min(x + patch.shape[1], image.shape[1])
+    ye = min(y + patch.shape[2], image.shape[2])
+    out[:, x:xe, y:ye] = patch[:, : xe - x, : ye - y]
+    return out
+
+
+def resize_patch(patch: torch.Tensor, size: int) -> torch.Tensor:
+    result: torch.Tensor = F.interpolate(
+        patch.unsqueeze(0), (size, size), mode="bilinear", align_corners=False
+    ).squeeze(0)
+    return result
 
 
 def make_evolution_video(

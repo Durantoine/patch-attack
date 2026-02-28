@@ -13,6 +13,14 @@
 
 Adversarial patch attacks on a semantic classifier built on top of DINOv3 (ViT-S/16). The patch causes pedestrians (or any other class) to disappear or be misclassified in a driving sequence.
 
+<div align="center">
+
+| **Attack visualization**<br><em>Person no longer detected (Seg Attacked empty)</em> | **Adversarial patch** |
+|:---:|:---:|
+| <img src="assets/demo_attack.png" alt="Attack demo" width="480"/> | <img src="assets/patch.png" alt="Adversarial patch" width="200"/> |
+
+</div>
+
 ---
 
 ## Pipeline
@@ -21,6 +29,7 @@ Adversarial patch attacks on a semantic classifier built on top of DINOv3 (ViT-S
 1. train_classifier.py   → train a linear probe on DINOv3 tokens (Cityscapes)
 2. generate_patch.py     → optimize an adversarial patch against the classifier
 3. visualize_sequence.py → visualize the attack on a sequence + export video
+4. eval_transfer.py      → evaluate transferability to a YOLO detector
 ```
 
 ---
@@ -28,23 +37,24 @@ Adversarial patch attacks on a semantic classifier built on top of DINOv3 (ViT-S
 ## Quick Start
 
 ```bash
-# Install the project (creates train-classifier, generate-patch, visualize-sequence commands)
+# Install the project
 uv sync
 
 # Place DINOv3 weights at:
 # src/patch_attack/models/weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth
 
 # 1. Train the classifier
-python -m patch_attack.train_classifier
+train-classifier
 
 # 2. Generate the adversarial patch
-python -m patch_attack.generate_patch
+generate-patch
 
 # 3. Visualize on a sequence
-python -m patch_attack.visualize_sequence
-```
+visualize-sequence
 
-Or after `uv sync`: `train-classifier` · `generate-patch` · `visualize-sequence`
+# 4. Evaluate transferability to YOLO
+eval-transfer
+```
 
 All parameters are in [`src/patch_attack/utils/config.py`](src/patch_attack/utils/config.py) — **no CLI arguments**.
 
@@ -71,11 +81,13 @@ inv lint       # ruff only
 │   └── gtFine_trainvaltest/        # Cityscapes labels
 ├── results/
 │   ├── classifier.pt               # Trained classifier
-│   ├── targeted_patch_best.pt      # Best patch (max fooling rate)
-│   ├── targeted_patch_final.pt     # Final patch
+│   ├── targeted_patch_best.pt      # Best patch (max fooling rate during training)
+│   ├── targeted_patch_final.pt     # Final patch (used by default)
 │   ├── targeted_attack_results.png # Fooling rate curve + patch
-│   ├── patch_evolution/            # Patch snapshots during training
+│   ├── patch_evolution/            # Patch snapshots (log-spaced)
 │   ├── patch_evolution.mp4         # Patch evolution video
+│   ├── patch_evolution_grid.png    # Snapshot grid
+│   ├── transfer_stuttgart_02.png   # Transferability graph
 │   └── demo/
 │       ├── stuttgart_02.mp4        # Attack video on sequence
 │       └── stuttgart_02_analysis.png  # Fooling rate graph across 3 distances
@@ -84,6 +96,7 @@ inv lint       # ruff only
         ├── train_classifier.py
         ├── generate_patch.py
         ├── visualize_sequence.py
+        ├── eval_transfer.py
         ├── utils/
         │   ├── config.py           # All parameters
         │   └── viz.py              # Visualization utilities
@@ -105,7 +118,7 @@ CITYSCAPES_LABELS = "data/gtFine_trainvaltest/gtFine/train"
 DATASET           = "data/leftImg8bit_trainvaltest/leftImg8bit/train"
 VIZ_DATASET       = "data/stuttgart/stuttgart_02"  # or stuttgart_00, stuttgart_01
 CLASSIFIER        = "results/classifier.pt"
-PATCH             = "results/targeted_patch_best.pt"
+PATCH             = "results/targeted_patch_final.pt"
 OUTPUT_DIR        = "results"
 
 IMG_SIZE = 896      # 224=14×14 | 448=28×28 | 672=42×42 | 896=56×56 tokens
@@ -119,9 +132,13 @@ ATTACK_STEPS             = 4000
 ATTACK_LR                = 0.05
 ATTACK_BATCH_SIZE        = 4
 ATTACK_MIN_SOURCE_TOKENS = 10    # images filtered if < N source tokens
-PATCH_SIZE               = 140   # size on the image (~16% of IMG_SIZE)
-PATCH_RES                = 512   # internal optimization resolution
+PATCH_SIZE               = 143   # size on the image (~16% of IMG_SIZE)
+PATCH_RES                = 384   # internal optimization resolution
 PATCH_PERSPECTIVE_MIN_SCALE = 0.3  # 3× smaller at top (far) than bottom (near)
+
+YOLO_MODEL       = "yolov8n.pt"
+YOLO_CONF        = 0.25
+YOLO_PERSON_CLASS = 0
 ```
 
 > [!TIP]
@@ -160,10 +177,10 @@ Optimizes a patch so that tokens of the source class are misclassified.
 Press `q` to stop early.
 
 **Outputs:**
-- `results/targeted_patch_best.pt` — best patch (max fooling rate)
+- `results/targeted_patch_best.pt` — best patch (max fooling rate during training)
 - `results/targeted_patch_final.pt` — final patch
 - `results/targeted_attack_results.png` — curve + patch
-- `results/patch_evolution.mp4` — evolution video
+- `results/patch_evolution.mp4` — evolution video (log-spaced frames, dense at start)
 - `results/patch_evolution_grid.png` — snapshot grid
 
 ---
@@ -187,6 +204,35 @@ Row 2 : [ PCA 3D scatter | L2 Heatmap Far | Medium | Near ]
 **Outputs:**
 - `results/demo/<dataset>.mp4` — attack video
 - `results/demo/<dataset>_analysis.png` — fooling rate graph + disappearance frames
+
+---
+
+## Step 4 — Transferability Evaluation
+
+Evaluates whether the patch trained against the DINOv3 classifier also fools a **YOLOv8** person detector — a different architecture it was never optimized against.
+
+For each frame of `VIZ_DATASET`, the patch is applied at a fixed position (perspective-correct) and YOLO detections are compared between clean and patched images.
+
+**Live visualization:**
+```
+[ Clean (YOLO dets) | Attacked (YOLO dets) | Patch | Summary panel ]
+```
+
+**Console output (after run):**
+```
+====================================================
+RÉSULTATS TRANSFÉRABILITÉ (DINOv3 patch → YOLO)
+====================================================
+Dét. moy. (clean)   : X.XX/img
+Dét. moy. (attaque) : X.XX/img
+Chute détections    : XX%
+Taux disparition    : X/Y = XX%
+Conf. moy. (clean)  : X.XXXX
+Conf. moy. (attaque): X.XXXX
+====================================================
+```
+
+**Output:** `results/transfer_<dataset>.png` — detection history graph
 
 ---
 

@@ -19,12 +19,14 @@ dependencies = [
     "regex>=2023.0.0",
     "opencv-python>=4.8.0",
     "kornia>=0.7.0",
+    "ultralytics>=8.0.0",
 ]
 
 [project.scripts]
 train-classifier   = "patch_attack.train_classifier:main"
 generate-patch     = "patch_attack.generate_patch:main"
 visualize-sequence = "patch_attack.visualize_sequence:main"
+eval-transfer      = "patch_attack.eval_transfer:main"
 
 [project.optional-dependencies]
 dev = [

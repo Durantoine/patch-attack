@@ -22,7 +22,6 @@ from .utils.config import (
     PATCH_MIN_ROW_RATIO,
     PATCH_PERSPECTIVE_MIN_SCALE,
     PATCH_RES,
-    PATCH_SAVE_EVERY,
     PATCH_SIZE,
     PATCH_Y_RATIO,
     SOURCE_CLASS,
@@ -243,15 +242,28 @@ class PatchAttack:
         if not evo_steps or evo_steps[-1] != step:
             torch.save(self.patch.detach().cpu(), self.evo_dir / f"patch_step_{step:05d}.pt")
             evo_steps.append(step)
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
-        ax1.plot(history)
-        ax1.set_title(f"Fooling rate ({self.src_name}→{self.tgt_name})")
-        ax1.set_ylim(0, 1)
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+        x = np.arange(1, len(history) + 1)
+        win = max(1, len(history) // 40)
+        smooth = np.convolve(history, np.ones(win) / win, mode="valid")
+        x_smooth = x[win - 1 :]
+        ax1.plot(x, history, color="#90caf9", lw=0.8, alpha=0.4)
+        ax1.plot(x_smooth, smooth, color="#1565c0", lw=2.0, label=f"FR (avg {win} steps)")
+        ax1.axhline(max(history), color="#ef9a9a", ls="--", lw=1, alpha=0.7,
+                    label=f"Best: {max(history):.0%}")
+        ax1.set_title(f"Fooling rate — {self.src_name} → {self.tgt_name}")
+        ax1.set_xlabel("Step")
+        ax1.set_ylabel("Fooling rate")
+        ax1.set_ylim(-0.02, 1.05)
+        ax1.set_xlim(1, len(history))
+        ax1.legend(loc="upper left", fontsize=9)
+        ax1.grid(True, alpha=0.3)
         ax2.imshow(np.clip(self.patch.detach().cpu().permute(1, 2, 0).numpy(), 0, 1))
-        ax2.set_title("Patch")
+        ax2.set_title("Patch final")
         ax2.axis("off")
         plt.tight_layout()
         plt.savefig(self.out_dir / "targeted_attack_results.png", dpi=150)
+        plt.close()
         print(f"Résultats → {self.out_dir}")
         make_evolution_video(
             self.evo_dir,
@@ -269,6 +281,10 @@ class PatchAttack:
             print("Aucune image valide.")
             return
         history, evo_steps, best_fr = [], [], 0.0
+        _evo_save_steps = set(
+            int(s)
+            for s in np.unique(np.round(np.logspace(0, np.log10(ATTACK_STEPS), 80)).astype(int))
+        )
         cv2.namedWindow("Patch Training", cv2.WINDOW_NORMAL)
         step = 1
         for step in range(1, ATTACK_STEPS + 1):
@@ -280,7 +296,7 @@ class PatchAttack:
             if fr > best_fr:
                 best_fr = fr
                 torch.save(self.patch.detach().cpu(), self.out_dir / "targeted_patch_best.pt")
-            if step % PATCH_SAVE_EVERY == 0:
+            if step in _evo_save_steps:
                 torch.save(self.patch.detach().cpu(), self.evo_dir / f"patch_step_{step:05d}.pt")
                 evo_steps.append(step)
             if step % 50 == 0:

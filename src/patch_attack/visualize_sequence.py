@@ -22,7 +22,6 @@ from .utils.config import (
     PATCH_MIN_ROW_RATIO,
     PATCH_PERSPECTIVE_MIN_SCALE,
     PATCH_SIZE,
-    PATCH_Y_RATIO,
     REFRESH,
     SOURCE_CLASS,
     VIZ_DATASET,
@@ -137,9 +136,10 @@ class SequenceVisualizer:
         self.clf.eval()
         self.img_size: int = clf_data.get("img_size", 224)
         self.grid = self.img_size // 16
-        self.patch = torch.load(PATCH, map_location=self.device, weights_only=True).to(self.device)
-        if self.patch.shape[1] != PATCH_SIZE or self.patch.shape[2] != PATCH_SIZE:
-            self.patch = resize_patch(self.patch, PATCH_SIZE)
+        patch_raw = torch.load(PATCH, map_location=self.device, weights_only=True)
+        if patch_raw.ndim == 4:
+            patch_raw = patch_raw[0]
+        self.patch = patch_raw.float().clamp(0, 1)
         print(
             f"Patch : {self.patch.shape} | Image {self.img_size}×{self.img_size} "
             f"→ {self.grid}×{self.grid} tokens | {self.device}"
@@ -173,16 +173,16 @@ class SequenceVisualizer:
             eff = compute_perspective_size(
                 x, self.img_size, PATCH_SIZE, PATCH_PERSPECTIVE_MIN_SCALE
             )
-            y = min(int((self.img_size - eff) * PATCH_Y_RATIO), self.img_size - eff - 1)
+            y = min(int((self.img_size - eff) * 0.96), self.img_size - eff - 1)
             configs.append({"name": name, "x": x, "y": y, "size": eff})
         return configs
 
     def _random_viz_cfg(self) -> dict:
-        row_ratio = random.uniform(PATCH_MIN_ROW_RATIO, 0.78)
-        y_ratio = random.uniform(PATCH_Y_RATIO, min(PATCH_Y_RATIO + 0.10, 0.97))
-        x = int(self.img_size * row_ratio)
+        x_min = int(self.img_size * PATCH_MIN_ROW_RATIO)
+        x_max = max(x_min + 1, self.img_size - PATCH_SIZE)
+        x = random.randint(x_min, x_max)
         eff = compute_perspective_size(x, self.img_size, PATCH_SIZE, PATCH_PERSPECTIVE_MIN_SCALE)
-        y = min(int((self.img_size - eff) * y_ratio), self.img_size - eff - 1)
+        y = min(int((self.img_size - eff) * 0.96), self.img_size - eff - 1)
         return {"name": "visu", "x": x, "y": y, "size": eff}
 
     def get_tokens(self, img_tensor: torch.Tensor) -> torch.Tensor:
@@ -190,7 +190,9 @@ class SequenceVisualizer:
             feats = self.model.get_intermediate_layers(img_tensor.unsqueeze(0), n=1)[0]
         return F.normalize(feats[0, 1:], dim=1)
 
-    def clf_vis(self, tokens: torch.Tensor, size: int) -> tuple[np.ndarray, np.ndarray]:
+    def clf_vis(
+        self, tokens: torch.Tensor, size: int, src_color: tuple = (255, 140, 0)
+    ) -> tuple[np.ndarray, np.ndarray]:
         with torch.no_grad():
             preds = self.clf(tokens).argmax(-1).cpu().numpy()
         n = self.grid * self.grid
@@ -198,7 +200,8 @@ class SequenceVisualizer:
         seg = preds.reshape(self.grid, self.grid)
         colored = np.full((self.grid, self.grid, 3), OTHER_COLOR, dtype=np.uint8)
         for c in FOCUS_CLASSES:
-            colored[seg == c] = CITYSCAPES_COLORS[c]
+            color = src_color if c == SOURCE_CLASS else CITYSCAPES_COLORS[c]
+            colored[seg == c] = color
         return cv2.resize(colored, (size, size), interpolation=cv2.INTER_NEAREST), preds
 
     def process_frame(
@@ -244,7 +247,7 @@ class SequenceVisualizer:
         patch_d = resize_patch(self.patch, cfg["size"])
         patched = apply_patch(img_tensor, patch_d, (cfg["x"], cfg["y"]))
         tokens_d = self.get_tokens(patched)
-        adv_vis, adv_preds = self.clf_vis(tokens_d, size)
+        adv_vis, adv_preds = self.clf_vis(tokens_d, size, src_color=(20, 140, 20))
         n_adv = int((adv_preds == SOURCE_CLASS).sum())
         n_fooled = int(((ref_preds == SOURCE_CLASS) & (adv_preds != SOURCE_CLASS)).sum())
         fr = n_fooled / n_src if n_src > 0 else 0.0
@@ -285,7 +288,6 @@ class SequenceVisualizer:
         for c in FOCUS_CLASSES:
             if c != SOURCE_CLASS:
                 diff[ref_preds_2d == c] = CITYSCAPES_COLORS[c]
-        diff[(ref_preds_2d == SOURCE_CLASS) & (adv_preds_2d == SOURCE_CLASS)] = [30, 200, 30]
         diff[(ref_preds_2d == SOURCE_CLASS) & (adv_preds_2d != SOURCE_CLASS)] = [220, 30, 30]
         diff = cv2.resize(diff, (size, size), interpolation=cv2.INTER_NEAREST).astype(np.uint8)
         diff_panel = cv2.cvtColor(diff, cv2.COLOR_RGB2BGR)
@@ -442,8 +444,20 @@ class SequenceVisualizer:
         plt.tight_layout()
         plot_path = DEMO_DIR / (Path(VIZ_DATASET).name + "_analysis.png")
         plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+        plt.close()
         print(f"Graphe → {plot_path}")
-        plt.show()
+
+        avg_fr = float(np.mean(fooling_history)) if fooling_history else 0.0
+        max_fr = float(np.max(fooling_history)) if fooling_history else 0.0
+        pct_gone = 100 * len(disappeared_frames) // max(1, n_frames)
+        print("\n" + "=" * 48)
+        print(f"RÉSULTATS  —  {Path(VIZ_DATASET).name}")
+        print("=" * 48)
+        print(f"Frames analysées    : {n_frames}")
+        print(f"Fooling rate moyen  : {avg_fr:.1%}")
+        print(f"Fooling rate max    : {max_fr:.1%}")
+        print(f"Frames disparues    : {len(disappeared_frames)}/{n_frames} ({pct_gone}%)")
+        print("=" * 48)
 
     def run(self) -> None:
         image_paths = sorted(

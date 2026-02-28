@@ -45,6 +45,8 @@ data/
 *.gif
 *.bmp
 *.tiff
+!assets/*.png
+!assets/*.jpg
 
 # Results
 results/*
